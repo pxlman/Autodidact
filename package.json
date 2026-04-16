@@ -1,0 +1,25 @@
+{
+    "name": "autodidact",
+    "version": "0.1.0",
+    "description": "Local-first, self-learning AI agent framework",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "demo": "tsx demo/run-demo.ts"
+    },
+    "keywords": [
+        "ai",
+        "agent",
+        "self-learning",
+        "local-first",
+        "llm"
+    ],
+    "license": "MIT",
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
