@@ -234,12 +234,8 @@ export class SelfVerificationSystem implements ISelfVerificationSystem {
     }
 
     private flagAsStale(entryId: string): void {
-        this.db
-            .prepare(
-                `UPDATE knowledge_entries SET is_stale = 1 WHERE id = ?`,
-            )
-            .run(entryId);
+        this.knowledgeStore.invalidate(entryId);
 
-        this.logger.info('SelfVerificationSystem: flagged entry as stale', { entryId });
+        this.logger.info('SelfVerificationSystem: flagged entry as stale (invalidated)', { entryId });
     }
 }

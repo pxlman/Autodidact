@@ -13,6 +13,7 @@ export { SkillEvolver } from './components/skill-evolver.js';
 export { UserProfile } from './components/user-profile.js';
 export { MetricsTracker } from './components/metrics-tracker.js';
 export { LLMClient } from './components/llm-client.js';
+export { ContextBuilder } from './components/context-builder.js';
 
 // ── Types and Interfaces ────────────────────────────────────
 export type {
@@ -24,6 +25,12 @@ export type {
     SignalScores,
     SignalWeights,
     QueryOutcome,
+    KnowledgeCategory,
+    KnowledgeScope,
+    TemporalQuery,
+    ContextLayerLevel,
+    ContextLayerConfig,
+    ContextResult,
     KnowledgeEntry,
     NewKnowledgeEntry,
     SkillStep,
@@ -49,6 +56,7 @@ export type {
     ILLMClient,
     IConfidenceEvaluator,
     IKnowledgeStore,
+    IContextBuilder,
     ISkillStore,
     ICloudRouter,
     ILearningExtractor,

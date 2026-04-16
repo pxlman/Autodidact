@@ -46,6 +46,21 @@ export const CloudProviderSchema = z.object({
     priority: z.number().int().min(0),
 });
 
+// ── Knowledge Category Schema ────────────────────────────────
+export const KnowledgeCategorySchema = z.enum(['facts', 'events', 'discoveries', 'preferences', 'advice']);
+
+// ── Knowledge Scope Schema ──────────────────────────────────
+export const KnowledgeScopeSchema = z.object({
+    domain: z.string().optional(),
+    topic: z.string().optional(),
+    category: KnowledgeCategorySchema.optional(),
+});
+
+// ── Temporal Query Schema ───────────────────────────────────
+export const TemporalQuerySchema = z.object({
+    asOf: z.string().optional(),
+});
+
 // ── New Knowledge Entry Schema ──────────────────────────────
 export const NewKnowledgeEntrySchema = z.object({
     content: z.string().min(1),
@@ -55,6 +70,9 @@ export const NewKnowledgeEntrySchema = z.object({
     embedding: z.array(z.number()).optional(),
     selfTestQuestions: z.array(z.string()).optional(),
     metadata: z.record(z.unknown()).optional(),
+    domain: z.string().optional(),
+    topic: z.string().optional(),
+    category: KnowledgeCategorySchema.optional(),
 });
 
 // ── New Skill Entry Schema ──────────────────────────────────
@@ -140,6 +158,16 @@ export const AutodidactConfigSchema = z.object({
     database: z
         .object({
             path: z.string().default('./autodidact.db'),
+        })
+        .default({}),
+
+    contextLayers: z
+        .object({
+            l0TokenBudget: z.number().int().positive().default(50),
+            l1TokenBudget: z.number().int().positive().default(120),
+            l2TokenBudget: z.number().int().positive().default(500),
+            l3TokenBudget: z.number().int().positive().default(1000),
+            l3Threshold: z.number().min(0).max(1).default(0.5),
         })
         .default({}),
 });

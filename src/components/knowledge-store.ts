@@ -2,9 +2,12 @@ import type Database from 'better-sqlite3';
 import type {
     ExpireResult,
     IKnowledgeStore,
+    KnowledgeCategory,
     KnowledgeEntry,
+    KnowledgeScope,
     KnowledgeStoreStats,
     NewKnowledgeEntry,
+    TemporalQuery,
 } from '../types.js';
 import { cosineSimilarity } from '../utils/cosine-similarity.js';
 import {
@@ -52,13 +55,18 @@ export class KnowledgeStore implements IKnowledgeStore {
             ? serializeEmbedding(entry.embedding)
             : null;
 
+        const domain = entry.domain ?? 'general';
+        const topic = entry.topic ?? 'uncategorized';
+        const category = entry.category ?? 'facts';
+
         this.db
             .prepare(
                 `INSERT INTO knowledge_entries
                 (id, content, source, confidence, tags, embedding, tier,
                  usage_count, created_at, last_accessed, promoted_at,
-                 is_stale, self_test_questions, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, 'STM', 0, ?, ?, NULL, 0, ?, ?)`,
+                 is_stale, self_test_questions, metadata,
+                 domain, topic, category, valid_from, valid_to)
+                VALUES (?, ?, ?, ?, ?, ?, 'STM', 0, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?, NULL)`,
             )
             .run(
                 id,
@@ -71,6 +79,10 @@ export class KnowledgeStore implements IKnowledgeStore {
                 now,
                 JSON.stringify(entry.selfTestQuestions ?? []),
                 JSON.stringify(entry.metadata ?? {}),
+                domain,
+                topic,
+                category,
+                now,
             );
 
         this.logger.debug('KnowledgeStore.insert: created STM entry', { id });
@@ -82,12 +94,35 @@ export class KnowledgeStore implements IKnowledgeStore {
         _query: string,
         embedding: number[],
         limit: number = 10,
+        scope?: KnowledgeScope,
+        temporal?: TemporalQuery,
     ): KnowledgeEntry[] {
-        const rows = this.db
-            .prepare(
-                `SELECT * FROM knowledge_entries WHERE is_stale = 0`,
-            )
-            .all() as RawRow[];
+        let sql = `SELECT * FROM knowledge_entries WHERE is_stale = 0`;
+        const params: unknown[] = [];
+
+        // Temporal filtering
+        if (temporal?.asOf) {
+            sql += ` AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)`;
+            params.push(temporal.asOf, temporal.asOf);
+        } else {
+            sql += ` AND valid_to IS NULL`;
+        }
+
+        // Scope filtering
+        if (scope?.domain) {
+            sql += ` AND domain = ?`;
+            params.push(scope.domain);
+        }
+        if (scope?.topic) {
+            sql += ` AND topic = ?`;
+            params.push(scope.topic);
+        }
+        if (scope?.category) {
+            sql += ` AND category = ?`;
+            params.push(scope.category);
+        }
+
+        const rows = this.db.prepare(sql).all(...params) as RawRow[];
 
         const scored: { entry: KnowledgeEntry; score: number }[] = [];
 
@@ -163,6 +198,17 @@ export class KnowledgeStore implements IKnowledgeStore {
         this.logger.debug('KnowledgeStore.expire: deleted', { id });
     }
 
+    invalidate(id: string): void {
+        const now = nowISO();
+        this.db
+            .prepare(
+                `UPDATE knowledge_entries SET valid_to = ? WHERE id = ?`,
+            )
+            .run(now, id);
+
+        this.logger.debug('KnowledgeStore.invalidate: set valid_to', { id });
+    }
+
     runDecayCycle(): ExpireResult {
         let expired = 0;
         let promoted = 0;
@@ -177,9 +223,6 @@ export class KnowledgeStore implements IKnowledgeStore {
             if (entry.tier === 'STM') {
                 const elapsed = msSince(entry.createdAt);
                 if (elapsed > this.config.stmTtlMs) {
-                    // STM past TTL — check if it was accessed within promotion window
-                    // If accessed (usageCount > 0) and within promotion window, promote
-                    // Otherwise expire
                     if (
                         entry.usageCount > 0 &&
                         msSince(entry.lastAccessed) <=
@@ -193,8 +236,6 @@ export class KnowledgeStore implements IKnowledgeStore {
                     }
                 }
             } else if (entry.tier === 'LTM') {
-                // Ebbinghaus decay: R(t) = e^(-t/S)
-                // S = baseStability × (1 + ln(1 + usageCount))
                 const t = hoursSince(entry.lastAccessed);
                 const S =
                     this.config.ltmBaseStabilityHours *
@@ -251,6 +292,49 @@ export class KnowledgeStore implements IKnowledgeStore {
         return { total, stm, ltm, stale };
     }
 
+    listDomains(): string[] {
+        const rows = this.db
+            .prepare(
+                `SELECT DISTINCT domain FROM knowledge_entries WHERE valid_to IS NULL ORDER BY domain`,
+            )
+            .all() as { domain: string }[];
+        return rows.map((r) => r.domain);
+    }
+
+    listTopics(domain: string): string[] {
+        const rows = this.db
+            .prepare(
+                `SELECT DISTINCT topic FROM knowledge_entries WHERE domain = ? AND valid_to IS NULL ORDER BY topic`,
+            )
+            .all(domain) as { topic: string }[];
+        return rows.map((r) => r.topic);
+    }
+
+    listCategories(): KnowledgeCategory[] {
+        const rows = this.db
+            .prepare(
+                `SELECT DISTINCT category FROM knowledge_entries WHERE valid_to IS NULL ORDER BY category`,
+            )
+            .all() as { category: string }[];
+        return rows.map((r) => r.category as KnowledgeCategory);
+    }
+
+    getCrossDomainTopics(): Array<{ topic: string; domains: string[] }> {
+        const rows = this.db
+            .prepare(
+                `SELECT topic, GROUP_CONCAT(DISTINCT domain) as domains
+                 FROM knowledge_entries
+                 WHERE valid_to IS NULL
+                 GROUP BY topic
+                 HAVING COUNT(DISTINCT domain) > 1`,
+            )
+            .all() as { topic: string; domains: string }[];
+        return rows.map((r) => ({
+            topic: r.topic,
+            domains: r.domains.split(','),
+        }));
+    }
+
     // ── Private helpers ─────────────────────────────────────
 
     private rowToEntry(row: RawRow): KnowledgeEntry {
@@ -271,6 +355,11 @@ export class KnowledgeStore implements IKnowledgeStore {
             isStale: row.is_stale === 1,
             selfTestQuestions: JSON.parse(row.self_test_questions) as string[],
             metadata: JSON.parse(row.metadata) as Record<string, unknown>,
+            domain: row.domain,
+            topic: row.topic,
+            category: row.category as KnowledgeCategory,
+            validFrom: row.valid_from,
+            validTo: row.valid_to,
         };
     }
 }
@@ -291,4 +380,9 @@ interface RawRow {
     is_stale: number;
     self_test_questions: string;
     metadata: string;
+    domain: string;
+    topic: string;
+    category: string;
+    valid_from: string;
+    valid_to: string | null;
 }

@@ -45,6 +45,35 @@ export interface SignalWeights {
 
 export type QueryOutcome = 'success' | 'failure';
 
+// ── Knowledge Hierarchy Types ────────────────────────────────
+export type KnowledgeCategory = 'facts' | 'events' | 'discoveries' | 'preferences' | 'advice';
+
+export interface KnowledgeScope {
+    domain?: string;
+    topic?: string;
+    category?: KnowledgeCategory;
+}
+
+export interface TemporalQuery {
+    asOf?: string;
+}
+
+// ── Context Layer Types ─────────────────────────────────────
+export type ContextLayerLevel = 'L0' | 'L1' | 'L2' | 'L3';
+
+export interface ContextLayerConfig {
+    level: ContextLayerLevel;
+    tokenBudget: number;
+    description: string;
+}
+
+export interface ContextResult {
+    prompt: string;
+    layersUsed: ContextLayerLevel[];
+    tokensByLayer: Record<ContextLayerLevel, number>;
+    totalTokens: number;
+}
+
 // ── Knowledge Store Types ───────────────────────────────────
 export interface KnowledgeEntry {
     id: string;
@@ -61,6 +90,11 @@ export interface KnowledgeEntry {
     isStale: boolean;
     selfTestQuestions: string[];
     metadata: Record<string, unknown>;
+    domain: string;
+    topic: string;
+    category: KnowledgeCategory;
+    validFrom: string;
+    validTo: string | null;
 }
 
 export interface NewKnowledgeEntry {
@@ -71,6 +105,9 @@ export interface NewKnowledgeEntry {
     embedding?: number[];
     selfTestQuestions?: string[];
     metadata?: Record<string, unknown>;
+    domain?: string;
+    topic?: string;
+    category?: KnowledgeCategory;
 }
 
 // ── Skill Store Types ───────────────────────────────────────
@@ -232,6 +269,14 @@ export interface AutodidactConfig {
     database: {
         path: string;
     };
+
+    contextLayers: {
+        l0TokenBudget: number;
+        l1TokenBudget: number;
+        l2TokenBudget: number;
+        l3TokenBudget: number;
+        l3Threshold: number;
+    };
 }
 
 // ── Error Type ──────────────────────────────────────────────
@@ -303,13 +348,22 @@ export interface IConfidenceEvaluator {
 
 export interface IKnowledgeStore {
     insert(entry: NewKnowledgeEntry): KnowledgeEntry;
-    search(query: string, embedding: number[], limit?: number): KnowledgeEntry[];
+    search(query: string, embedding: number[], limit?: number, scope?: KnowledgeScope, temporal?: TemporalQuery): KnowledgeEntry[];
     get(id: string): KnowledgeEntry | null;
     access(id: string): void;
     promoteToLTM(id: string): void;
     expire(id: string): void;
+    invalidate(id: string): void;
     runDecayCycle(): ExpireResult;
     getStats(): KnowledgeStoreStats;
+    listDomains(): string[];
+    listTopics(domain: string): string[];
+    listCategories(): KnowledgeCategory[];
+    getCrossDomainTopics(): Array<{ topic: string; domains: string[] }>;
+}
+
+export interface IContextBuilder {
+    build(query: string, routing: RoutingResult, context: EvaluationContext): ContextResult;
 }
 
 export interface ISkillStore {

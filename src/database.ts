@@ -137,18 +137,42 @@ CREATE TABLE IF NOT EXISTS skill_evolution_log (
 CREATE INDEX IF NOT EXISTS idx_evolution_skill ON skill_evolution_log(skill_id);
 `;
 
+const MIGRATION_V2 = `
+-- Add MemPalace-inspired columns to knowledge_entries
+ALTER TABLE knowledge_entries ADD COLUMN domain TEXT NOT NULL DEFAULT 'general';
+ALTER TABLE knowledge_entries ADD COLUMN topic TEXT NOT NULL DEFAULT 'uncategorized';
+ALTER TABLE knowledge_entries ADD COLUMN category TEXT NOT NULL DEFAULT 'facts';
+ALTER TABLE knowledge_entries ADD COLUMN valid_from TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_entries ADD COLUMN valid_to TEXT;
+
+-- Backfill valid_from for existing rows
+UPDATE knowledge_entries SET valid_from = created_at WHERE valid_from = '';
+
+-- Add indexes for hierarchical knowledge and temporal queries
+CREATE INDEX IF NOT EXISTS idx_knowledge_domain ON knowledge_entries(domain);
+CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON knowledge_entries(topic);
+CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge_entries(category);
+CREATE INDEX IF NOT EXISTS idx_knowledge_domain_topic ON knowledge_entries(domain, topic);
+CREATE INDEX IF NOT EXISTS idx_knowledge_valid_from ON knowledge_entries(valid_from);
+CREATE INDEX IF NOT EXISTS idx_knowledge_valid_to ON knowledge_entries(valid_to);
+`;
+
 export function initDatabase(dbPath: string): Database.Database {
-    const db = new Database(dbPath);
+  const db = new Database(dbPath);
 
-    // Enable WAL mode for concurrent reads
-    db.pragma('journal_mode = WAL');
+  // Enable WAL mode for concurrent reads
+  db.pragma('journal_mode = WAL');
 
-    const currentVersion = db.pragma('user_version', { simple: true }) as number;
+  const currentVersion = db.pragma('user_version', { simple: true }) as number;
 
-    if (currentVersion < 1) {
-        db.exec(SCHEMA_V1);
-        db.pragma('user_version = 1');
-    }
+  if (currentVersion < 1) {
+    db.exec(SCHEMA_V1);
+    db.exec(MIGRATION_V2);
+    db.pragma('user_version = 2');
+  } else if (currentVersion < 2) {
+    db.exec(MIGRATION_V2);
+    db.pragma('user_version = 2');
+  }
 
-    return db;
+  return db;
 }

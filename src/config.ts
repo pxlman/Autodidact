@@ -51,6 +51,14 @@ export const DEFAULT_CONFIG: AutodidactConfig = {
     database: {
         path: './autodidact.db',
     },
+
+    contextLayers: {
+        l0TokenBudget: 50,
+        l1TokenBudget: 120,
+        l2TokenBudget: 500,
+        l3TokenBudget: 1000,
+        l3Threshold: 0.5,
+    },
 };
 
 /**
@@ -91,6 +99,10 @@ export function resolveConfig(partial?: Partial<AutodidactConfig>): AutodidactCo
         database: {
             ...DEFAULT_CONFIG.database,
             ...partial.database,
+        },
+        contextLayers: {
+            ...DEFAULT_CONFIG.contextLayers,
+            ...partial.contextLayers,
         },
     };
 }
