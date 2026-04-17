@@ -66,6 +66,7 @@ export type {
     ISkillEvolver,
     IUserProfile,
     IMetricsTracker,
+    ScoredKnowledgeEntry,
     IToolRegistry,
     ToolDefinition,
     ToolConfig,

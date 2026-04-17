@@ -7,6 +7,7 @@ import type {
     KnowledgeScope,
     KnowledgeStoreStats,
     NewKnowledgeEntry,
+    ScoredKnowledgeEntry,
     TemporalQuery,
 } from '../types.js';
 import { cosineSimilarity } from '../utils/cosine-similarity.js';
@@ -96,7 +97,7 @@ export class KnowledgeStore implements IKnowledgeStore {
         limit: number = 10,
         scope?: KnowledgeScope,
         temporal?: TemporalQuery,
-    ): KnowledgeEntry[] {
+    ): ScoredKnowledgeEntry[] {
         let sql = `SELECT * FROM knowledge_entries WHERE is_stale = 0`;
         const params: unknown[] = [];
 
@@ -136,7 +137,7 @@ export class KnowledgeStore implements IKnowledgeStore {
         }
 
         scored.sort((a, b) => b.score - a.score);
-        return scored.slice(0, limit).map((s) => s.entry);
+        return scored.slice(0, limit);
     }
 
     get(id: string): KnowledgeEntry | null {

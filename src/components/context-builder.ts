@@ -3,8 +3,8 @@ import type {
     ContextResult,
     EvaluationContext,
     IContextBuilder,
-    KnowledgeEntry,
     RoutingResult,
+    ScoredKnowledgeEntry,
 } from '../types.js';
 
 export interface ContextBuilderConfig {
@@ -52,11 +52,11 @@ export class ContextBuilder implements IContextBuilder {
 
         // L1: Always loaded — critical facts + user profile summary
         const l1Parts: string[] = [];
-        const criticalHits = context.knowledgeHits.filter((k) => k.confidence >= 0.8);
+        const criticalHits = context.knowledgeHits.filter((k) => k.entry.confidence >= 0.8);
         if (criticalHits.length > 0) {
             l1Parts.push('Key facts:');
             for (const k of criticalHits.slice(0, 3)) {
-                l1Parts.push(`- ${k.content}`);
+                l1Parts.push(`- ${k.entry.content}`);
             }
         }
         const l1 = l1Parts.join('\n');
@@ -71,7 +71,7 @@ export class ContextBuilder implements IContextBuilder {
         if (this.queryMatchesDomainOrTopic(context.knowledgeHits)) {
             const l2Parts: string[] = ['Topic-specific knowledge:'];
             for (const k of context.knowledgeHits.slice(0, 5)) {
-                l2Parts.push(`- [${k.domain}/${k.topic}] ${k.content}`);
+                l2Parts.push(`- [${k.entry.domain}/${k.entry.topic}] ${k.entry.content}`);
             }
             const l2 = l2Parts.join('\n');
             const l2Truncated = this.truncateToTokenBudget(l2, this.config.l2TokenBudget);
@@ -86,7 +86,7 @@ export class ContextBuilder implements IContextBuilder {
             if (context.knowledgeHits.length > 0) {
                 l3Parts.push('Relevant knowledge:');
                 for (const k of context.knowledgeHits) {
-                    l3Parts.push(`- ${k.content}`);
+                    l3Parts.push(`- ${k.entry.content}`);
                 }
             }
             if (context.skillHits.length > 0) {
@@ -131,15 +131,15 @@ export class ContextBuilder implements IContextBuilder {
      * Check if ≥2 knowledge hits share a common domain or topic.
      * If so, L2 (topic-specific context) should be loaded.
      */
-    private queryMatchesDomainOrTopic(hits: KnowledgeEntry[]): boolean {
+    private queryMatchesDomainOrTopic(hits: ScoredKnowledgeEntry[]): boolean {
         if (hits.length < 2) return false;
 
         const domainCounts = new Map<string, number>();
         const topicCounts = new Map<string, number>();
 
         for (const h of hits) {
-            domainCounts.set(h.domain, (domainCounts.get(h.domain) ?? 0) + 1);
-            topicCounts.set(h.topic, (topicCounts.get(h.topic) ?? 0) + 1);
+            domainCounts.set(h.entry.domain, (domainCounts.get(h.entry.domain) ?? 0) + 1);
+            topicCounts.set(h.entry.topic, (topicCounts.get(h.entry.topic) ?? 0) + 1);
         }
 
         for (const count of domainCounts.values()) {

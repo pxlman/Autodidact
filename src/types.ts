@@ -18,7 +18,7 @@ export interface ChatResponse {
 
 // ── Confidence Evaluator Types ──────────────────────────────
 export interface EvaluationContext {
-    knowledgeHits: KnowledgeEntry[];
+    knowledgeHits: ScoredKnowledgeEntry[];
     skillHits: SkillEntry[];
 }
 
@@ -355,7 +355,7 @@ export interface IConfidenceEvaluator {
 
 export interface IKnowledgeStore {
     insert(entry: NewKnowledgeEntry): KnowledgeEntry;
-    search(query: string, embedding: number[], limit?: number, scope?: KnowledgeScope, temporal?: TemporalQuery): KnowledgeEntry[];
+    search(query: string, embedding: number[], limit?: number, scope?: KnowledgeScope, temporal?: TemporalQuery): ScoredKnowledgeEntry[];
     get(id: string): KnowledgeEntry | null;
     access(id: string): void;
     promoteToLTM(id: string): void;
@@ -367,6 +367,12 @@ export interface IKnowledgeStore {
     listTopics(domain: string): string[];
     listCategories(): KnowledgeCategory[];
     getCrossDomainTopics(): Array<{ topic: string; domains: string[] }>;
+}
+
+/** Knowledge entry with its similarity score from search */
+export interface ScoredKnowledgeEntry {
+    entry: KnowledgeEntry;
+    score: number;  // cosine similarity 0-1
 }
 
 export interface IContextBuilder {

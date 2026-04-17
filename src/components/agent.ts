@@ -162,7 +162,7 @@ export class Agent implements IAgent {
             let content: string;
             let cost = 0;
             const sourcesUsed: string[] = [
-                ...knowledgeHits.map((k) => k.id),
+                ...knowledgeHits.map((k) => k.entry.id),
                 ...skillHits.map((s) => s.id),
             ];
 
@@ -328,7 +328,7 @@ export class Agent implements IAgent {
     // ── Private helpers ─────────────────────────────────────
 
     private buildContext(
-        knowledgeHits: { content: string }[],
+        knowledgeHits: { entry: { content: string }; score: number }[],
         skillHits: { name: string; description: string; steps: { order: number; description: string }[] }[],
     ): string {
         const parts: string[] = [];
@@ -336,7 +336,7 @@ export class Agent implements IAgent {
         if (knowledgeHits.length > 0) {
             parts.push('Relevant knowledge:');
             for (const k of knowledgeHits) {
-                parts.push(`- ${k.content}`);
+                parts.push(`- ${k.entry.content}`);
             }
         }
 
@@ -352,7 +352,7 @@ export class Agent implements IAgent {
     }
 
     private buildLocalPrompt(
-        knowledgeHits: { content: string }[],
+        knowledgeHits: { entry: { content: string }; score: number }[],
         skillHits: { name: string; description: string }[],
         _routing: RoutingResult,
     ): string {
@@ -371,7 +371,7 @@ export class Agent implements IAgent {
         if (knowledgeHits.length > 0) {
             parts.push('', 'Relevant knowledge:');
             for (const k of knowledgeHits) {
-                parts.push(`- ${k.content}`);
+                parts.push(`- ${k.entry.content}`);
             }
         }
 

@@ -256,7 +256,7 @@ export class ConfidenceEvaluator implements IConfidenceEvaluator {
         const knowledgeSimilarity = this.computeKnowledgeSimilarity(context);
         const skillCoverage = this.computeSkillCoverage(context);
         const queryComplexity = this.computeQueryComplexity(query);
-        const selfAssessment = await this.computeSelfAssessment(query);
+        const selfAssessment = await this.computeSelfAssessment(query, context);
 
         return {
             knowledgeSimilarity,
@@ -270,18 +270,8 @@ export class ConfidenceEvaluator implements IConfidenceEvaluator {
         if (context.knowledgeHits.length === 0) {
             return 0;
         }
-        // The knowledge hits are already sorted by similarity from the store search.
-        // We take the max similarity. Since we don't have the raw similarity score
-        // stored on the entry, we use confidence as a proxy if no embedding,
-        // or compute similarity between the first hit's embedding and itself (=1).
-        // In practice, the caller provides pre-searched hits, so the first hit
-        // is the most similar. We use confidence of the best hit as a proxy.
-        // A better approach: the hits come from search() which orders by similarity.
-        // The best hit's confidence is a reasonable proxy for knowledge similarity.
-        // However, the design says "max cosine similarity from the provided knowledgeHits".
-        // Since we don't have the query embedding here, we use the confidence of the top hit.
-        // The top hit from search() is already the most similar.
-        return Math.min(1, Math.max(0, context.knowledgeHits[0].confidence));
+        // Use the actual cosine similarity score from the search results
+        return Math.min(1, Math.max(0, context.knowledgeHits[0].score));
     }
 
     private computeSkillCoverage(context: EvaluationContext): number {
@@ -332,17 +322,24 @@ export class ConfidenceEvaluator implements IConfidenceEvaluator {
         return 1 - complexity;
     }
 
-    private async computeSelfAssessment(query: string): Promise<number> {
+    private async computeSelfAssessment(query: string, context: EvaluationContext): Promise<number> {
         try {
+            // Build context summary so the LLM knows what knowledge is available
+            let contextHint = '';
+            if (context.knowledgeHits.length > 0) {
+                contextHint = '\n\nAvailable knowledge:\n' +
+                    context.knowledgeHits.slice(0, 3).map(h => `- ${h.entry.content.slice(0, 100)}`).join('\n');
+            }
+
             const response = await this.llmClient.chat([
                 {
                     role: 'system',
                     content:
-                        'You are a confidence estimator. Respond with ONLY a single number between 0 and 1 representing your confidence in answering the given query. No other text.',
+                        'You are a confidence estimator. Respond with ONLY a single number between 0 and 1 representing your confidence in answering the given query. 0 means you have no idea, 1 means you are certain. No other text.',
                 },
                 {
                     role: 'user',
-                    content: `Rate your confidence 0-1 in answering: ${query}`,
+                    content: `Rate your confidence 0-1 in answering: ${query}${contextHint}`,
                 },
             ]);
 
