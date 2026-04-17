@@ -138,7 +138,3 @@ If this resonates, reach out via GitHub Discussions or open an issue tagged `co-
 - GitHub Discussions — questions, ideas, proposals
 - Issues — bugs, feature requests, good-first-issues
 - PRs — code contributions
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the MIT License.
