@@ -29,6 +29,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from autodidact.database import init_database
+from autodidact.document_store import DocumentStore, ScoredChunk
 from autodidact.knowledge_store import KnowledgeStore, ScoredKnowledgeEntry
 from autodidact.learning_extractor import ExtractionResult, LearningExtractor
 from autodidact.llm_client import ChatMessage, ChatResponseWithLogprobs, LLMClient, LLMConfig
@@ -162,7 +163,22 @@ class Agent:
         # Conversation history (in-session only).
         self._history: list[dict] = []  # [{"role": "user"/"assistant", "content": "..."}]
 
+        # Document store for ingested source materials (R9). Separate from
+        # agent memory per AD-002. None unless attached via attach_document_store()
+        # or set by the caller directly. Retrieved alongside memory at query
+        # time with different prompt framing.
+        self.documents: Optional[DocumentStore] = None
+
     # ── Public API ────────────────────────────────────────────────
+
+    def attach_document_store(self, store: DocumentStore) -> None:
+        """Wire an existing DocumentStore into this agent.
+
+        Document chunks will be retrieved alongside agent memory at query
+        time and injected into the prompt with distinct framing ('from your
+        documents' vs 'from past interactions').
+        """
+        self.documents = store
 
     def query(
         self,
@@ -502,9 +518,16 @@ class Agent:
         if memory_context:
             parts.append(f"\n{memory_context}")
 
-        # External context (from user's RAG pipeline or document store).
+        # Document context (from user's ingested source materials — R9 AC8).
+        # Framed distinctly from memory so the model knows "source material"
+        # vs "something you answered before".
+        document_context = self._format_document_context(question)
+        if document_context:
+            parts.append(f"\n{document_context}")
+
+        # External context (from user's RAG pipeline or caller-supplied).
         if context:
-            parts.append(f"\nRelevant documents:\n{context}")
+            parts.append(f"\nRelevant context:\n{context}")
 
         system = "\n".join(parts)
         messages = [ChatMessage(role="system", content=system)]
@@ -527,6 +550,32 @@ class Agent:
             q = h.entry.question or "unknown question"
             a = (h.entry.content or "")[:500]
             lines.append(f"{i}. (Previously asked: {q.strip()[:120]})\n   {a.strip()}")
+        return "\n".join(lines)
+
+    def _format_document_context(self, question: str) -> str:
+        """Retrieve and format document chunks relevant to the question (R9 AC8).
+
+        Returns empty string if no document store is attached, the store is
+        empty, or no chunk is above the relevance threshold.
+        """
+        store = getattr(self, "documents", None)
+        if store is None:
+            return ""
+        try:
+            hits = store.search(question, limit=3)
+        except Exception as e:
+            logger.warning("Document retrieval failed: %s", e)
+            return ""
+        # Threshold is intentionally lower than memory's MEMORY_CONTEXT_THRESHOLD —
+        # docs are reference material, we inject them more liberally.
+        relevant = [h for h in hits if h.score >= 0.30]
+        if not relevant:
+            return ""
+        lines = ["Here is relevant information from your documents:"]
+        for i, h in enumerate(relevant, 1):
+            content = (h.content or "")[:500].strip()
+            source = Path(h.source_file).name if h.source_file else "document"
+            lines.append(f"{i}. (from {source})\n   {content}")
         return "\n".join(lines)
 
     def _compute_confidence(self, resp: ChatResponseWithLogprobs) -> float:

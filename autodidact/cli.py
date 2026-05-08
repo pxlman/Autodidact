@@ -80,7 +80,19 @@ def _agent_from_config(config: dict) -> Agent:
         import os
         os.environ.setdefault("OPENAI_API_KEY", cloud_api_key)
 
-    return Agent(**kwargs)
+    agent = Agent(**kwargs)
+
+    # Attach a DocumentStore so ingested docs are retrieved alongside memory (R9).
+    if agent._embed_client is not None:
+        from autodidact.document_store import DocumentStore
+
+        agent.attach_document_store(DocumentStore(
+            agent._conn,
+            agent._embed_client,
+            embedding_dim=agent._config.embedding_dim,
+        ))
+
+    return agent
 
 
 def _get_agent(config_path: Optional[Path] = None) -> Agent:
@@ -289,3 +301,79 @@ def memory_search(
         a = (entry.content or "")[:200]
         console.print(f"  {i}. [{hit.score:.2f}] Q: {q}")
         console.print(f"     A: {a}", style="dim")
+
+
+# ── autodidact learn ───────────────────────────────────────────────
+
+
+@app.command()
+def learn(
+    path: Optional[str] = typer.Argument(
+        None, help="File or directory to ingest"
+    ),
+    stats: bool = typer.Option(
+        False, "--stats", help="Show ingestion stats instead of ingesting"
+    ),
+    config_path: Optional[str] = typer.Option(None, "--config-path"),
+) -> None:
+    """Ingest documents to solve cold start (R9).
+
+    Points the agent at existing files so it has knowledge from day one,
+    before any cloud escalations.
+
+        autodidact learn ~/docs/policies/     # ingest a folder
+        autodidact learn ./README.md          # ingest a file
+        autodidact learn --stats              # show totals
+    """
+    cfg_path = Path(config_path) if config_path else None
+    agent = _get_agent(cfg_path)
+
+    if agent.documents is None:
+        console.print(
+            "No document store available. Check your config — an embedding "
+            "client is required for `autodidact learn`.",
+            style="red",
+        )
+        raise typer.Exit(1)
+
+    if stats:
+        s = agent.documents.get_stats()
+        console.print("─── Document Store Stats ───", style="bold")
+        console.print(f"  Total files:   {s.get('total_files', 0)}")
+        console.print(f"  Total chunks:  {s.get('total_chunks', 0)}")
+        sources = s.get("sources", {})
+        if sources:
+            console.print("  Top sources:")
+            for src, n in list(sources.items())[:5]:
+                short = Path(src).name
+                console.print(f"    {short:40} {n} chunks")
+        return
+
+    if path is None:
+        console.print(
+            "Provide a file or directory to ingest (or use --stats).",
+            style="yellow",
+        )
+        raise typer.Exit(1)
+
+    target = Path(path).expanduser()
+    if not target.exists():
+        console.print(f"Path does not exist: {target}", style="red")
+        raise typer.Exit(1)
+
+    console.print(f"Ingesting {target}...", style="dim")
+
+    def _progress(evt: dict) -> None:
+        if evt.get("type") == "file_ingested":
+            f = Path(evt.get("file", "")).name
+            chunks = evt.get("chunks", 0)
+            total = evt.get("total_files", 0)
+            console.print(f"  [{total}] {f} → {chunks} chunks", style="dim")
+
+    result = agent.documents.ingest(target, on_progress=_progress)
+
+    console.print("─── Ingestion Complete ───", style="bold green")
+    console.print(f"  Files ingested:  {result.files_ingested}")
+    console.print(f"  Chunks created:  {result.chunks_created}")
+    if result.files_skipped > 0:
+        console.print(f"  Files skipped:   {result.files_skipped}", style="yellow")
