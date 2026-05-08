@@ -68,6 +68,7 @@ def agent_with_mocks(mock_local_client, mock_cloud_client):
     agent._cloud_model_name = "openai/gpt-4o"
     agent._session_stats = SavingsReport()
     agent._history = []
+    agent.documents = None
     return agent
 
 
@@ -312,3 +313,83 @@ class TestStaleMemoryFallthrough:
 
         assert resp.routed_to == "local"
         agent._local_client.chat_with_logprobs.assert_called_once()
+
+
+class TestDocumentContextIntegration:
+    """Agent.query() injects document chunks alongside agent memory (R9 AC8)."""
+
+    def test_agent_accepts_document_store(self, agent_with_mocks):
+        """Agent.attach_document_store() wires a DocumentStore into the agent."""
+        from autodidact.document_store import DocumentStore
+
+        doc_store = DocumentStore(
+            agent_with_mocks._conn,
+            agent_with_mocks._embed_client,
+            embedding_dim=32,
+        )
+        agent_with_mocks.attach_document_store(doc_store)
+        assert agent_with_mocks.documents is doc_store
+
+    def test_document_context_reaches_local_prompt(self, agent_with_mocks, tmp_path):
+        """Ingested documents show up in the system prompt sent to the local model."""
+        from autodidact.document_store import DocumentStore
+
+        doc_store = DocumentStore(
+            agent_with_mocks._conn,
+            agent_with_mocks._embed_client,
+            embedding_dim=32,
+        )
+        doc_file = tmp_path / "notes.md"
+        doc_file.write_text("Our PTO policy is 20 days per year.")
+        doc_store.ingest(doc_file)
+        agent_with_mocks.attach_document_store(doc_store)
+
+        agent_with_mocks.query("What is our PTO policy?")
+
+        # The local client's chat_with_logprobs should have been called with
+        # messages whose system prompt mentions "documents".
+        call = agent_with_mocks._local_client.chat_with_logprobs.call_args
+        messages = call[0][0] if call[0] else call[1].get("messages")
+        system_msg = next((m for m in messages if m.role == "system"), None)
+        assert system_msg is not None
+        # R9 AC8: documents use distinct framing.
+        assert "documents" in system_msg.content.lower() or "PTO" in system_msg.content
+
+    def test_document_framing_differs_from_memory_framing(self, agent_with_mocks, tmp_path):
+        """R9 AC8: document context uses different prompt framing than memory.
+
+        - Memory: 'Here is what you recall from past interactions: ...'
+        - Documents: 'Here is relevant information from your documents: ...'
+        """
+        from autodidact.document_store import DocumentStore
+
+        doc_store = DocumentStore(
+            agent_with_mocks._conn,
+            agent_with_mocks._embed_client,
+            embedding_dim=32,
+        )
+        doc_file = tmp_path / "policies.md"
+        doc_file.write_text("Remote work is allowed 3 days per week.")
+        doc_store.ingest(doc_file)
+        agent_with_mocks.attach_document_store(doc_store)
+
+        agent_with_mocks.query("What is our remote work policy?")
+
+        call = agent_with_mocks._local_client.chat_with_logprobs.call_args
+        messages = call[0][0] if call[0] else call[1].get("messages")
+        system_msg = next((m for m in messages if m.role == "system"), None)
+        assert system_msg is not None
+        # Should mention "documents" specifically — not generic "knowledge" framing
+        # which is reserved for agent memory hits.
+        assert "documents" in system_msg.content.lower()
+
+    def test_no_document_store_no_docs_framing(self, agent_with_mocks):
+        """Without a document store attached, the prompt has no document section."""
+        agent_with_mocks.query("Random question")
+
+        call = agent_with_mocks._local_client.chat_with_logprobs.call_args
+        messages = call[0][0] if call[0] else call[1].get("messages")
+        system_msg = next((m for m in messages if m.role == "system"), None)
+        assert system_msg is not None
+        # R9 AC8 negative case: no "from your documents" if no store attached.
+        assert "from your documents" not in system_msg.content.lower()

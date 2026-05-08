@@ -226,3 +226,75 @@ class TestChatCommand:
         result = runner.invoke(app, ["chat"], input="What is Python?\nquit\n")
         assert result.exit_code == 0
         mock_agent.query.assert_called_once_with("What is Python?")
+
+
+# ── autodidact learn ──────────────────────────────────────────────
+
+
+class TestLearnCommand:
+    """autodidact learn <path> — document ingestion (R9)."""
+
+    @patch("autodidact.cli.Agent")
+    def test_learn_ingests_a_file(self, MockAgent, tmp_path):
+        """`autodidact learn <file>` calls DocumentStore.ingest on that path."""
+        mock_agent = MagicMock()
+        mock_agent.documents = MagicMock()
+        mock_result = MagicMock()
+        mock_result.files_ingested = 1
+        mock_result.chunks_created = 3
+        mock_result.files_skipped = 0
+        mock_agent.documents.ingest.return_value = mock_result
+        MockAgent.return_value = mock_agent
+
+        f = tmp_path / "note.md"
+        f.write_text("A note.")
+
+        result = runner.invoke(app, ["learn", str(f)])
+        assert result.exit_code == 0, result.output
+        mock_agent.documents.ingest.assert_called_once()
+        # Output should include the counts.
+        assert "1" in result.output
+        assert "3" in result.output
+
+    @patch("autodidact.cli.Agent")
+    def test_learn_ingests_a_directory(self, MockAgent, tmp_path):
+        """`autodidact learn <dir>` walks the directory."""
+        mock_agent = MagicMock()
+        mock_agent.documents = MagicMock()
+        mock_result = MagicMock()
+        mock_result.files_ingested = 5
+        mock_result.chunks_created = 12
+        mock_result.files_skipped = 0
+        mock_agent.documents.ingest.return_value = mock_result
+        MockAgent.return_value = mock_agent
+
+        result = runner.invoke(app, ["learn", str(tmp_path)])
+        assert result.exit_code == 0
+        mock_agent.documents.ingest.assert_called_once()
+
+    @patch("autodidact.cli.Agent")
+    def test_learn_stats_shows_totals(self, MockAgent):
+        """`autodidact learn --stats` shows total files, chunks, sources."""
+        mock_agent = MagicMock()
+        mock_agent.documents = MagicMock()
+        mock_agent.documents.get_stats.return_value = {
+            "total_chunks": 42,
+            "total_files": 7,
+            "sources": {"/path/to/notes.md": 10, "/path/to/readme.md": 32},
+        }
+        MockAgent.return_value = mock_agent
+
+        result = runner.invoke(app, ["learn", "--stats"])
+        assert result.exit_code == 0
+        assert "42" in result.output  # total chunks
+        assert "7" in result.output   # total files
+
+    @patch("autodidact.cli.Agent")
+    def test_learn_nonexistent_path_errors(self, MockAgent):
+        """Ingesting a path that doesn't exist reports an error."""
+        mock_agent = MagicMock()
+        mock_agent.documents = MagicMock()
+        MockAgent.return_value = mock_agent
+
+        result = runner.invoke(app, ["learn", "/nonexistent/path/xyz"])
+        assert result.exit_code != 0 or "not found" in result.output.lower() or "does not exist" in result.output.lower()

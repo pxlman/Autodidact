@@ -175,6 +175,24 @@ CREATE TABLE IF NOT EXISTS routellm_training_rows (
 
 CREATE INDEX IF NOT EXISTS idx_rltr_seed ON routellm_training_rows(training_seed);
 CREATE INDEX IF NOT EXISTS idx_rltr_seed_model ON routellm_training_rows(training_seed, local_model);
+
+-- ── Document store (R9: cold start fix) ────────────────────────────
+-- Separate from knowledge_entries per AD-002. Documents answer
+-- "what do the source materials say?"; knowledge_entries answer
+-- "have I been asked this before?"
+
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id                TEXT PRIMARY KEY,
+    content           TEXT NOT NULL,
+    source_file       TEXT NOT NULL,
+    chunk_index       INTEGER NOT NULL,
+    embedding         BLOB,
+    tags              TEXT NOT NULL DEFAULT '[]',
+    created_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_source_file ON document_chunks(source_file);
+CREATE INDEX IF NOT EXISTS idx_dc_created_at ON document_chunks(created_at);
 """
 
 
