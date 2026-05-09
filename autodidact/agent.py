@@ -138,9 +138,16 @@ class Agent:
             # "openai/gpt-4o-mini" → provider="openai", model="gpt-4o-mini".
             provider, model = _parse_model_string(local_model, default_provider="ollama")
             emb_model = embedding_model or "qllama/bge-large-en-v1.5"
-            # Strip provider prefix from embedding model if present.
-            if "/" in emb_model and not emb_model.startswith("http"):
-                _, emb_model = emb_model.split("/", 1)
+            # Strip ONLY known provider prefixes (ollama/, openai/, bedrock/) —
+            # not arbitrary namespaces. Ollama models commonly live under
+            # third-party namespaces like 'qllama/bge-large-en-v1.5' or
+            # 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF' where the slash is
+            # part of the model's identity. Stripping those breaks embedding
+            # lookups (Ollama 404s on the bare name).
+            if "/" in emb_model:
+                first_segment, rest = emb_model.split("/", 1)
+                if first_segment.lower() in ("ollama", "openai", "bedrock"):
+                    emb_model = rest
             local_config_kwargs: dict = {
                 "provider": provider,
                 "model": model,

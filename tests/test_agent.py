@@ -393,3 +393,83 @@ class TestDocumentContextIntegration:
         assert system_msg is not None
         # R9 AC8 negative case: no "from your documents" if no store attached.
         assert "from your documents" not in system_msg.content.lower()
+
+
+class TestEmbeddingModelNamespace:
+    """Embedding model names with non-provider namespaces must be preserved (bugfix).
+
+    Ollama model names can have arbitrary namespaces like 'qllama/bge-large-en-v1.5'
+    or 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF'. These are the actual names Ollama
+    uses when pulling and serving models.
+
+    The Agent constructor had an overly aggressive prefix-stripping rule that chopped
+    everything before the first '/', turning 'qllama/bge-large-en-v1.5' into
+    'bge-large-en-v1.5'. Ollama then 404'd because no such model exists.
+
+    Fix: only strip prefixes that name a known *provider* (ollama, openai, bedrock).
+    Namespaced Ollama model names (qllama/*, hf.co/*, etc.) pass through unchanged.
+    """
+
+    def _build_local_llm_config(self, local_model: str, embedding_model: str):
+        """Run Agent.__init__ and return the LLMConfig handed to LLMClient for the local slot.
+
+        Uses a mock so we can inspect what config was built without hitting Ollama.
+        """
+        with patch("autodidact.agent.LLMClient") as MockClient:
+            MockClient.return_value = MagicMock()
+            Agent(
+                local_model=local_model,
+                embedding_model=embedding_model,
+                db_path=":memory:",
+            )
+            # First LLMClient call is for the local slot.
+            return MockClient.call_args_list[0][0][0]
+
+    def test_qllama_namespace_preserved(self):
+        """'qllama/bge-large-en-v1.5' must not be stripped to 'bge-large-en-v1.5'."""
+        config = self._build_local_llm_config(
+            local_model="ollama/qwen2.5:7b",
+            embedding_model="qllama/bge-large-en-v1.5",
+        )
+        assert config.embedding_model == "qllama/bge-large-en-v1.5", (
+            f"Expected namespace preserved, got {config.embedding_model!r}. "
+            "qllama/ is a namespace, not a provider prefix — stripping it "
+            "breaks Ollama lookups."
+        )
+
+    def test_hf_co_namespace_preserved(self):
+        """'hf.co/...' namespaces from HuggingFace-hosted Ollama models survive."""
+        config = self._build_local_llm_config(
+            local_model="ollama/qwen2.5:7b",
+            embedding_model="hf.co/CompendiumLabs/bge-base-en-v1.5-gguf",
+        )
+        assert config.embedding_model == "hf.co/CompendiumLabs/bge-base-en-v1.5-gguf"
+
+    def test_ollama_provider_prefix_still_stripped(self):
+        """Explicit 'ollama/' provider prefix IS stripped — it's not part of the model name."""
+        config = self._build_local_llm_config(
+            local_model="ollama/qwen2.5:7b",
+            embedding_model="ollama/nomic-embed-text",
+        )
+        assert config.embedding_model == "nomic-embed-text", (
+            f"Expected provider prefix stripped, got {config.embedding_model!r}"
+        )
+
+    def test_bare_embedding_name_unchanged(self):
+        """A bare embedding name with no '/' passes through as-is."""
+        config = self._build_local_llm_config(
+            local_model="ollama/qwen2.5:7b",
+            embedding_model="nomic-embed-text",
+        )
+        assert config.embedding_model == "nomic-embed-text"
+
+    def test_default_embedding_namespace_preserved(self):
+        """When no embedding model is specified, the qllama/ default is kept intact."""
+        config = self._build_local_llm_config(
+            local_model="ollama/qwen2.5:7b",
+            embedding_model=None,
+        )
+        assert config.embedding_model == "qllama/bge-large-en-v1.5", (
+            "Default embedding model should keep its qllama/ namespace — "
+            "stripping it silently breaks fresh Ollama installs."
+        )
