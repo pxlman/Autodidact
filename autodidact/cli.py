@@ -383,18 +383,51 @@ def chat(
             # Re-escalate the last question.
             if agent._history:
                 last_q = agent._history[-2]["content"] if len(agent._history) >= 2 else line
-                resp = agent.correct(last_q)
+                with console.status("[dim]Re-verifying with cloud...", spinner="dots"):
+                    resp = agent.correct(last_q)
                 renderer.render_response(resp)
             else:
                 console.print("No previous question to correct.", style="yellow")
             continue
 
-        resp = agent.query(line.strip())
+        resp = _query_with_spinner(agent, line.strip())
         renderer.render_response(resp)
 
     # Session summary on exit.
     report = agent.savings()
     renderer.render_session_summary(report)
+
+
+def _query_with_spinner(agent: Agent, question: str) -> QueryResponse:
+    """Run agent.query() while showing a 'thinking' spinner that updates per progress event.
+
+    The spinner text changes as the agent moves through its stages so the user
+    knows whether the latency is from memory search, local generation, or a
+    cloud round-trip.
+    """
+    with console.status("[dim]Thinking...", spinner="dots") as status:
+        def on_progress(event: dict) -> None:
+            et = event.get("type")
+            if et == "thinking":
+                hits = event.get("memory_hits", 0)
+                if hits:
+                    status.update(f"[dim]Checking memory... found {hits} similar entries")
+                else:
+                    status.update("[dim]Checking memory...")
+            elif et == "memory_hit":
+                status.update("[dim]Recalling from memory...")
+            elif et == "local_done":
+                conf = event.get("confidence", 0.0)
+                status.update(f"[dim]Local answer (confidence {conf:.2f})...")
+            elif et == "cloud_call":
+                model = event.get("model", "cloud")
+                status.update(f"[dim]Asking {model}...")
+            elif et == "cloud_done":
+                status.update("[dim]Got cloud answer, learning from it...")
+            elif et == "learning":
+                status.update("[dim]Storing new knowledge...")
+
+        return agent.query(question, on_progress=on_progress)
 
 
 @app.command()
@@ -407,7 +440,7 @@ def query(
     agent = _get_agent(path)
     renderer = ThoughtRenderer()
 
-    resp = agent.query(question)
+    resp = _query_with_spinner(agent, question)
     renderer.render_response(resp)
 
 
