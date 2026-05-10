@@ -31,15 +31,45 @@ from autodidact.setup_wizard import (
 )
 from autodidact.thought_renderer import ThoughtRenderer
 
-app = typer.Typer(help="Autodidact — self-learning AI agent")
-memory_app = typer.Typer(help="Knowledge store commands")
-app.add_typer(memory_app, name="memory")
-
 console = Console()
 
-# ── Config loading ─────────────────────────────────────────────────
-
 _DEFAULT_CONFIG_PATH = Path("~/.autodidact/config.yaml").expanduser()
+
+app = typer.Typer(
+    help="Autodidact — self-learning AI agent",
+    invoke_without_command=True,
+    no_args_is_help=False,  # we'll handle the no-args case ourselves
+)
+memory_app = typer.Typer(help="Knowledge store commands")
+
+app.add_typer(memory_app, name="memory")
+
+
+@app.callback()
+def _main(ctx: typer.Context) -> None:
+    """Show a quickstart hint on bare `autodidact` invocations."""
+    if ctx.invoked_subcommand is not None:
+        return
+    # User typed `autodidact` with no subcommand — welcome them.
+    console.print("[bold]Autodidact[/bold] — a self-evolving AI agent that learns like a new employee.")
+    console.print()
+    if _DEFAULT_CONFIG_PATH.exists():
+        console.print("Quick reference:")
+        console.print()
+        console.print("  [cyan]autodidact chat[/cyan]              Interactive chat")
+        console.print("  [cyan]autodidact learn <path>[/cyan]      Ingest docs / code")
+        console.print("  [cyan]autodidact savings[/cyan]           Cost savings report")
+        console.print("  [cyan]autodidact memory stats[/cyan]      Knowledge store summary")
+        console.print()
+        console.print("  [cyan]autodidact --help[/cyan]            Full command list")
+    else:
+        console.print("Get started:")
+        console.print()
+        console.print("  [cyan]autodidact init[/cyan]              Zero-friction setup wizard")
+        console.print()
+        console.print("Already set up elsewhere? Point at your config with [cyan]--config-path[/cyan].")
+
+# ── Config loading ─────────────────────────────────────────────────
 
 
 def _load_config(path: Path) -> dict:
