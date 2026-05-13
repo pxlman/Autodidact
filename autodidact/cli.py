@@ -791,6 +791,8 @@ def _dispatch_slash(agent: Agent, line: str, renderer) -> bool:
       /cloud [text]                     — same as /wrong (no arg) or force a new
                                           question to cloud (/cloud <text>)
       /gsa [v2|v3|v4|help]              — show or switch the GSA prompt version
+      /learn <path>                     — ingest a file/folder into the document store
+                                          (/learn . for the current directory)
     """
     lower = line.lower().strip()
 
@@ -806,7 +808,67 @@ def _dispatch_slash(agent: Agent, line: str, renderer) -> bool:
         _handle_gsa_command(agent, line)
         return True
 
+    if lower == "/learn" or lower.startswith("/learn "):
+        _handle_learn_command(agent, line, renderer)
+        return True
+
     return False
+
+
+def _handle_learn_command(agent: Agent, line: str, renderer) -> None:
+    """Ingest a file or directory into the agent's document store.
+
+    Usage:
+      /learn <path>   — ingest the given file or directory
+      /learn .        — shortcut for the current working directory
+      /learn          — print usage hint, do nothing
+
+    Mirrors the ``autodidact learn`` CLI command but works mid-chat so users
+    can drop docs into context without leaving the REPL.
+    """
+    parts = line.split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if not arg:
+        console.print(
+            "Usage: [cyan]/learn <path>[/cyan]   (or [cyan]/learn .[/cyan] for the current directory)",
+            style="yellow",
+        )
+        return
+
+    if agent.documents is None:
+        console.print(
+            "[red]No document store available.[/red] "
+            "Check your config — an embedding client is required for [cyan]/learn[/cyan].",
+        )
+        return
+
+    target = Path(arg).expanduser()
+    # `.` resolves against the current working directory.
+    if not target.is_absolute():
+        target = (Path.cwd() / target).resolve() if str(target) == "." else target
+    if not target.exists():
+        console.print(f"[red]Path does not exist:[/red] {target}")
+        return
+
+    console.print(f"Ingesting [cyan]{target}[/cyan]...", style="dim")
+
+    def _progress(evt: dict) -> None:
+        if evt.get("type") == "file_ingested":
+            f = Path(evt.get("file", "")).name
+            chunks = evt.get("chunks", 0)
+            total = evt.get("total_files", 0)
+            console.print(f"  [{total}] {f} → {chunks} chunks", style="dim")
+
+    try:
+        result = agent.documents.ingest(target, on_progress=_progress)
+    except Exception as e:
+        console.print(f"[red]Ingest failed:[/red] {e}")
+        return
+
+    console.print("─── Ingestion Complete ───", style="bold green")
+    console.print(f"  Files ingested:  {result.files_ingested}")
+    console.print(f"  Chunks created:  {result.chunks_created}")
 
 
 def _handle_cloud_command(agent: Agent, line: str, renderer) -> None:
