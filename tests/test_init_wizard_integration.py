@@ -144,12 +144,17 @@ class TestOllamaAutoDetection:
 
     @patch("autodidact.cli._run_smoke_test")
     @patch("autodidact.cli.detect_ollama")
+    @patch("autodidact.cli.verify_model_loadable", return_value=True)
     @patch("autodidact.cli.is_model_available", return_value=False)
     @patch("autodidact.cli.pull_ollama_model", return_value=True)
     def test_missing_model_gets_pulled(
-        self, mock_pull, mock_available, mock_detect, mock_smoke, tmp_path
+        self, mock_pull, mock_available, mock_verify, mock_detect, mock_smoke, tmp_path
     ):
-        """When the selected model isn't pulled, init pulls it automatically."""
+        """When the selected model isn't pulled, init pulls it automatically.
+
+        is_model_available=False triggers the pull; verify_model_loadable=True
+        simulates a successful download (the model appears in ollama list after).
+        """
         from autodidact.setup_wizard import OllamaStatus
         mock_detect.return_value = OllamaStatus(installed=True, path="/usr/local/bin/ollama")
         cfg = tmp_path / "config.yaml"
@@ -160,6 +165,32 @@ class TestOllamaAutoDetection:
         assert result.exit_code == 0
         # pull_ollama_model should have been called (for chat model, embedding model, or both).
         assert mock_pull.call_count >= 1
+
+    @patch("autodidact.cli._run_smoke_test")
+    @patch("autodidact.cli.detect_ollama")
+    @patch("autodidact.cli.verify_model_loadable", return_value=False)
+    @patch("autodidact.cli.is_model_available", return_value=False)
+    @patch("autodidact.cli.pull_ollama_model", return_value=True)
+    def test_cloud_only_pull_fails_verification_and_exits(
+        self, mock_pull, mock_available, mock_verify, mock_detect, mock_smoke, tmp_path
+    ):
+        """Ollama 'cloud-only' tags 'pull' successfully but aren't loadable.
+
+        The wizard must detect this (verify_model_loadable=False after pull)
+        and stop before writing a broken config.
+        """
+        from autodidact.setup_wizard import OllamaStatus
+        mock_detect.return_value = OllamaStatus(installed=True, path="/usr/local/bin/ollama")
+        cfg = tmp_path / "config.yaml"
+
+        inputs = "3\n\n\n"  # local-only mode, defaults
+        result = runner.invoke(app, ["init", "--config-path", str(cfg)], input=inputs)
+
+        assert result.exit_code != 0, "Wizard must fail when pulled model isn't loadable"
+        assert not cfg.exists(), "Broken config must not be written"
+        # Error message should be specific about cloud-only tags.
+        assert ("cloud-only" in result.output.lower()
+                or "cannot be loaded" in result.output.lower())
 
 
 # ── Cloud provider presets ───────────────────────────────────────

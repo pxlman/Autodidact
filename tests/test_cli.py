@@ -194,10 +194,18 @@ class TestInitCommand:
     @patch("autodidact.cli._run_smoke_test")
     @patch("autodidact.cli.detect_ollama")
     @patch("autodidact.cli.is_model_available", return_value=True)
-    def test_init_defaults(self, mock_model, mock_detect, mock_smoke, tmp_path):
+    @patch("autodidact.cli.detect_hardware")
+    def test_init_defaults(self, mock_hw, mock_model, mock_detect, mock_smoke, tmp_path):
         """All defaults: mode=1 (local+cloud), default model, default cloud."""
         from autodidact.setup_wizard import OllamaStatus
+        from autodidact.hardware import HardwareProfile
         mock_detect.return_value = OllamaStatus(installed=True, path="/usr/local/bin/ollama")
+        # Pin hardware tier so the recommended default is stable regardless
+        # of the machine running the test.
+        mock_hw.return_value = HardwareProfile(
+            ram_gb=16, is_apple_silicon=False, has_nvidia=False,
+            vram_gb=None, tier="medium",
+        )
         config_path = tmp_path / "config.yaml"
         # mode default (1=local_cloud), model default, cloud=openai, api key, model default, db default
         input_text = "\n\nopenai\nsk-test\n\n\n"
@@ -208,7 +216,7 @@ class TestInitCommand:
         assert result.exit_code == 0, result.output
 
         config = yaml.safe_load(config_path.read_text())
-        assert config["local"]["model"] == "qwen2.5:7b"
+        assert config["local"]["model"] == "qwen3:8b"
         assert "Ready" in result.output
 
     @patch("autodidact.cli._run_smoke_test")

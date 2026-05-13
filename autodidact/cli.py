@@ -20,6 +20,7 @@ import yaml
 from rich.console import Console
 
 from autodidact.agent import Agent, QueryResponse, SavingsReport
+from autodidact.hardware import detect_hardware, recommended_local_model
 from autodidact.setup_wizard import (
     build_config,
     detect_ollama,
@@ -28,6 +29,7 @@ from autodidact.setup_wizard import (
     is_model_available,
     list_cloud_providers,
     pull_ollama_model,
+    verify_model_loadable,
 )
 from autodidact.thought_renderer import ThoughtRenderer
 
@@ -221,13 +223,7 @@ def init(
 
     console.print("[bold]Autodidact — Setup Wizard[/bold]")
     console.print()
-    console.print("[bold]Pick a setup mode:[/bold]")
-    console.print("  1. Local + Cloud   — Ollama local + cloud for escalation (best savings)")
-    console.print("  2. Cloud + Cloud   — cheap cloud + expensive cloud (no GPU needed)")
-    console.print("  3. Local only      — Ollama only, no cloud (free, no learning escalations)")
-    mode_input = typer.prompt("Mode", default="1")
-    mode_map = {"1": "local_cloud", "2": "cloud_cloud", "3": "local_only"}
-    mode = mode_map.get(mode_input.strip(), "local_cloud")
+    mode = _pick_setup_mode()
 
     if mode in ("local_cloud", "local_only"):
         config = _init_with_ollama(mode)
@@ -271,18 +267,25 @@ def _init_with_ollama(mode: str) -> dict:
             console.print("Aborted. Install Ollama and re-run `autodidact init`.", style="yellow")
             raise typer.Exit(0)
 
-    # Pick local model.
-    local_model = typer.prompt("Local chat model", default="qwen2.5:7b")
+    # Hardware-aware default.
+    profile = detect_hardware()
+    recommended = recommended_local_model(profile)
+    if profile.tier != "unknown":
+        ram_str = f"{profile.ram_gb:.0f}GB RAM"
+        apple_str = " Apple Silicon," if profile.is_apple_silicon else ""
+        gpu_str = f" {profile.vram_gb:.0f}GB NVIDIA VRAM," if profile.vram_gb else ""
+        console.print(
+            f"[dim]Detected:{apple_str}{gpu_str} {ram_str} → tier [bold]{profile.tier}[/bold][/dim]"
+        )
+
+    # Pick local model from curated list.
+    local_model = _pick_local_model(recommended=recommended)
     embedding_model = "qllama/bge-large-en-v1.5"
 
-    # Auto-pull missing models.
+    # Auto-pull missing models, then verify.
     if status.installed:
-        if not is_model_available(local_model):
-            console.print(f"Model [cyan]{local_model}[/cyan] not found. Pulling...", style="dim")
-            pull_ollama_model(local_model)
-        if not is_model_available(embedding_model):
-            console.print(f"Embedding model [cyan]{embedding_model}[/cyan] not found. Pulling...", style="dim")
-            pull_ollama_model(embedding_model)
+        _pull_and_verify(local_model, label="Chat model")
+        _pull_and_verify(embedding_model, label="Embedding model")
 
     # Cloud setup (only for local_cloud mode).
     if mode == "local_cloud":
@@ -303,6 +306,37 @@ def _init_with_ollama(mode: str) -> dict:
         local_model=local_model,
         embedding_model=embedding_model,
     )
+
+
+def _pull_and_verify(model_name: str, *, label: str) -> None:
+    """Pull a model if needed, then verify Ollama can actually serve it.
+
+    Catches the 'cloud-only tag' case where pull returns success but the
+    model never appears in ollama list. If verify fails, prints a helpful
+    error and raises typer.Exit so the wizard stops before writing a
+    broken config.
+    """
+    if is_model_available(model_name):
+        return
+
+    console.print(f"{label} [cyan]{model_name}[/cyan] not pulled yet. Downloading...", style="dim")
+    pull_ollama_model(model_name)
+
+    if not verify_model_loadable(model_name):
+        console.print(
+            f"\n[red]{label} [cyan]{model_name}[/cyan] pulled but cannot be loaded locally.[/red]"
+        )
+        console.print(
+            "  Likely cause: this tag points to cloud-only inference "
+            "(e.g. qwen3.5:9b, *:cloud). Pick a tag with real weights.",
+            style="dim",
+        )
+        console.print(
+            f"  Try: [cyan]ollama run {model_name}[/cyan] to confirm, "
+            f"then re-run [cyan]autodidact init[/cyan] with a different model.",
+            style="dim",
+        )
+        raise typer.Exit(1)
 
 
 def _init_cloud_to_cloud() -> dict:
@@ -328,6 +362,155 @@ def _init_cloud_to_cloud() -> dict:
     )
 
 
+def _questionary_available() -> bool:
+    """True if questionary can be imported AND stdin is a TTY.
+
+    Falls back to typer.prompt in non-interactive shells (CI, piped input)
+    so the wizard works in both modes.
+    """
+    try:
+        import questionary  # noqa: F401
+    except ImportError:
+        return False
+    import sys
+    return sys.stdin.isatty()
+
+
+def _pick_from_list(title: str, choices: list[str], default: str) -> str:
+    """Show a picker for ``choices`` with ``default`` pre-selected.
+
+    Uses questionary.select (arrow-key navigation) when available,
+    otherwise prints a numbered list and reads a number from typer.prompt.
+    Pressing Enter alone accepts the default; invalid input also returns
+    the default rather than looping.
+    """
+    if _questionary_available():
+        import questionary
+        # questionary raises on interrupt; keep behavior consistent with typer.
+        answer = questionary.select(title, choices=choices, default=default).ask()
+        if answer is None:
+            # User pressed Ctrl+C; re-raise as KeyboardInterrupt so typer handles it.
+            raise KeyboardInterrupt
+        return answer
+
+    # Fallback: numbered list.
+    console.print(f"[bold]{title}[/bold]")
+    for i, choice in enumerate(choices, start=1):
+        marker = " (default)" if choice == default else ""
+        console.print(f"  {i}. {choice}{marker}")
+    default_idx = str(choices.index(default) + 1) if default in choices else "1"
+    raw = typer.prompt("Choice", default=default_idx).strip()
+    if not raw:
+        return default
+    # Accept a 1-based index…
+    try:
+        idx = int(raw) - 1
+        if 0 <= idx < len(choices):
+            return choices[idx]
+    except ValueError:
+        pass
+    # …or a direct label / substring match against the choice list.
+    # This keeps existing integration tests working (they feed provider
+    # names like 'openrouter' rather than numbers).
+    raw_lower = raw.lower()
+    for choice in choices:
+        if choice.lower() == raw_lower:
+            return choice
+    for choice in choices:
+        if raw_lower in choice.lower():
+            return choice
+    return default
+
+
+# Curated list of Ollama models. Qwen 3 first (current generation, best
+# benchmarks), Qwen 2.5 kept for users who specifically want it, plus a few
+# alternatives. Routing signals are designed to be model-agnostic, so we
+# default to the newer generation even though our experiments ran on
+# qwen2.5:7b.
+_LOCAL_MODEL_CHOICES = [
+    ("qwen3:32b",          "largest dense Qwen 3 (20GB, needs 32GB+ RAM)"),
+    ("qwen3-coder:30b",    "code-specialized MoE (18GB, 32GB+ RAM)"),
+    ("qwen3:14b",          "bigger — 9GB, needs 16GB+ RAM"),
+    ("qwen3:8b",           "balanced default (5.2GB)"),
+    ("qwen3:4b",           "lightweight (2.5GB, 8GB machines)"),
+    ("qwen3:0.6b",         "minimal (523MB — quality is meh)"),
+    ("qwen2.5:14b",        "Qwen 2.5 generation, larger (9GB)"),
+    ("qwen2.5:7b",         "Qwen 2.5 generation, balanced (4.7GB)"),
+    ("llama3.2:3b",        "Meta small, 2GB"),
+    ("llama3.1:8b",        "Meta general, 4.9GB"),
+    ("mistral:7b-instruct", "Mistral instruct, 4.4GB"),
+]
+_OTHER_CHOICE = "Other (type a model name)"
+
+
+def _pick_local_model(*, recommended: str) -> str:
+    """Show the curated local-model list with ``recommended`` highlighted."""
+    labeled: list[str] = []
+    default_label = ""
+    for name, desc in _LOCAL_MODEL_CHOICES:
+        label = f"{name} — {desc}"
+        if name == recommended:
+            label = f"{name} — {desc} (recommended for this machine)"
+            default_label = label
+        labeled.append(label)
+    labeled.append(_OTHER_CHOICE)
+    if not default_label:
+        # recommended wasn't in the curated list; put it at the top.
+        custom_rec_label = f"{recommended} (recommended for this machine)"
+        labeled.insert(0, custom_rec_label)
+        default_label = custom_rec_label
+
+    chosen = _pick_from_list("Local chat model", labeled, default_label)
+    if chosen == _OTHER_CHOICE:
+        return typer.prompt("Model name").strip()
+    # Label format is "name — description". Pull the name off.
+    return chosen.split(" ", 1)[0].strip()
+
+
+def _pick_cloud_provider() -> str:
+    """Show the cloud provider list with 'other' fallback."""
+    providers = list_cloud_providers()
+    choices = list(providers) + [_OTHER_CHOICE]
+    chosen = _pick_from_list("Cloud provider", choices, "openai")
+    if chosen == _OTHER_CHOICE:
+        return typer.prompt("Provider name").strip().lower()
+    return chosen
+
+
+def _pick_cloud_model(preset: dict, *, slot: str) -> str:
+    """Show the cloud provider's model list with 'other' fallback."""
+    models = preset.get("models") or []
+    default_model = preset.get("default_cheap", "")
+    if slot in ("cloud", "expensive"):
+        default_model = preset.get("default_expensive") or default_model
+
+    if not models:
+        # No curated list — just prompt freely.
+        return typer.prompt("Model", default=default_model).strip()
+
+    choices = list(models) + [_OTHER_CHOICE]
+    default = default_model if default_model in models else models[0]
+    chosen = _pick_from_list("Model", choices, default)
+    if chosen == _OTHER_CHOICE:
+        return typer.prompt("Model name").strip()
+    return chosen
+
+
+def _pick_setup_mode() -> str:
+    """Show the 3 setup modes as a list; return the canonical key."""
+    labels = [
+        "Local + Cloud   — Ollama local + cloud for escalation (best savings)",
+        "Cloud + Cloud   — cheap cloud + expensive cloud (no GPU needed)",
+        "Local only      — Ollama only, no cloud (free, no learning escalations)",
+    ]
+    chosen = _pick_from_list("Pick a setup mode", labels, labels[0])
+    if "Local + Cloud" in chosen:
+        return "local_cloud"
+    if "Cloud + Cloud" in chosen:
+        return "cloud_cloud"
+    return "local_only"
+
+
 def _prompt_single_cloud_provider(*, slot: str) -> dict:
     """Interactively configure one cloud provider.
 
@@ -337,31 +520,7 @@ def _prompt_single_cloud_provider(*, slot: str) -> dict:
     Bedrock is handled separately — it uses AWS credentials, not a
     generic API key, and supports multiple auth modes.
     """
-    providers = list_cloud_providers()
-    console.print("  Providers: " + ", ".join(providers))
-
-    # Validate provider — offer closest match for typos.
-    while True:
-        provider = typer.prompt("  Provider", default="openai").strip().lower()
-        if provider in providers:
-            break
-        import difflib
-        suggestions = difflib.get_close_matches(provider, providers, n=3, cutoff=0.4)
-        if suggestions:
-            suggestion_str = ", ".join(f"[cyan]{s}[/cyan]" for s in suggestions)
-            console.print(
-                f"  [yellow]Unknown provider '[cyan]{provider}[/cyan]'.[/yellow] "
-                f"Did you mean: {suggestion_str}?"
-            )
-        else:
-            console.print(
-                f"  [yellow]Unknown provider '[cyan]{provider}[/cyan]'.[/yellow] "
-                f"Pick one of: {', '.join(providers)}."
-            )
-        if typer.confirm(f"  Use '{provider}' anyway as a custom provider?", default=False):
-            break
-        # Otherwise: loop and re-prompt.
-
+    provider = _pick_cloud_provider()
     preset = get_cloud_preset(provider)
 
     if provider == "bedrock":
@@ -371,38 +530,12 @@ def _prompt_single_cloud_provider(*, slot: str) -> dict:
 
 
 def _prompt_model_name(preset: dict, *, slot: str) -> str:
-    """Prompt for a model name, warning if it's not in the preset list.
+    """Prompt for a model name using the curated-list picker.
 
-    Allows users to enter custom models (fine-tunes, newer models the preset
-    doesn't know about) while catching typos in known model names.
+    Delegates to ``_pick_cloud_model`` which handles the 'Other' escape for
+    custom fine-tunes and new models the preset doesn't know about.
     """
-    default_model = preset.get("default_cheap", "")
-    if slot in ("cloud", "expensive"):
-        default_model = preset.get("default_expensive", "") or default_model
-    models = preset.get("models", [])
-    if models:
-        console.print("  Available models: " + ", ".join(models))
-    model = typer.prompt("  Model", default=default_model).strip()
-
-    if models and model not in models:
-        import difflib
-        suggestions = difflib.get_close_matches(model, models, n=3, cutoff=0.5)
-        if suggestions:
-            suggestion_str = ", ".join(f"[cyan]{s}[/cyan]" for s in suggestions)
-            console.print(
-                f"  [yellow]'{model}' is not in the known model list. "
-                f"Did you mean: {suggestion_str}?[/yellow]"
-            )
-            if not typer.confirm(f"  Use '{model}' anyway?", default=False):
-                # Re-prompt recursively so the user can pick again.
-                return _prompt_model_name(preset, slot=slot)
-        else:
-            console.print(
-                f"  [yellow]'{model}' is not in the known model list — "
-                f"using as a custom model name.[/yellow]"
-            )
-
-    return model
+    return _pick_cloud_model(preset, slot=slot)
 
 
 def _prompt_openai_compat_config(provider: str, preset: dict, slot: str) -> dict:

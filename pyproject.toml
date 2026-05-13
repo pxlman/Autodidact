@@ -47,6 +47,13 @@ Repository = "https://github.com/BuffaloTechRider/Autodidact"
 Issues = "https://github.com/BuffaloTechRider/Autodidact/issues"
 
 [project.optional-dependencies]
+# Enables nicer arrow-key pickers in `autodidact init` and hardware-aware
+# default model suggestions. Wizard degrades gracefully if these are missing
+# (numbered prompts + conservative defaults).
+wizard = [
+    "psutil>=5.9",
+    "questionary>=2.0",
+]
 openai = [
     "openai>=1.0",
 ]

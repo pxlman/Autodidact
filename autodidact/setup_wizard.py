@@ -57,6 +57,20 @@ def is_model_available(model_name: str) -> bool:
     return model_name in models
 
 
+def verify_model_loadable(model_name: str) -> bool:
+    """Check that Ollama can actually serve this model locally.
+
+    Some Ollama tags (notably the :cloud variants and several large Qwen 3.5
+    sizes) 'pull' a ~264-byte manifest that points to remote inference rather
+    than downloading weights. ollama pull returns 0, but ollama list never
+    shows the model and /api/chat 404s. This check catches that class of
+    half-successful pull.
+
+    Returns True only if the model appears in ollama list after the pull.
+    """
+    return is_model_available(model_name)
+
+
 def pull_ollama_model(model_name: str) -> bool:
     """Pull a model via Ollama. Returns True on success."""
     try:
@@ -297,7 +311,7 @@ def build_config(
 
     if mode == "local_cloud":
         config["local"] = {
-            "model": local_model or "qwen2.5:7b",
+            "model": local_model or "qwen3:8b",
             "embedding_model": embedding_model or "qllama/bge-large-en-v1.5",
         }
         if cloud_provider and cloud_model:
@@ -342,7 +356,7 @@ def build_config(
 
     elif mode == "local_only":
         config["local"] = {
-            "model": local_model or "qwen2.5:7b",
+            "model": local_model or "qwen3:8b",
             "embedding_model": embedding_model or "qllama/bge-large-en-v1.5",
         }
 
