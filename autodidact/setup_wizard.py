@@ -512,6 +512,85 @@ def discover_bedrock_models(
     return sorted(on_demand_ids | profile_ids)
 
 
+# ── OpenRouter model discovery ───────────────────────────────────
+
+
+class OpenRouterDiscoveryError(Exception):
+    """Raised when the OpenRouter /v1/models endpoint can't be reached or parsed."""
+
+
+@dataclass
+class OpenRouterModel:
+    """A single OpenRouter model surfaced by discovery.
+
+    Pricing is normalized to USD per 1M tokens (the unit users read in
+    OpenRouter's docs / pricing pages). The raw API returns USD per token.
+    """
+    id: str
+    prompt_per_million: float
+    completion_per_million: float
+    context_length: int
+
+
+_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+
+
+def discover_openrouter_models() -> list[OpenRouterModel]:
+    """Query OpenRouter's public /v1/models endpoint.
+
+    No API key is needed — the catalog is public. Filters to text-output
+    models with valid pricing, sorts cheapest first by prompt+completion
+    cost. Returns an empty list only if the API returns zero usable models;
+    raises :class:`OpenRouterDiscoveryError` for any network or HTTP error.
+    """
+    try:
+        resp = requests.get(_OPENROUTER_MODELS_URL, timeout=10.0)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise OpenRouterDiscoveryError(str(e)) from e
+
+    try:
+        payload = resp.json()
+    except ValueError as e:
+        raise OpenRouterDiscoveryError(f"non-JSON response: {e}") from e
+
+    out: list[OpenRouterModel] = []
+    for entry in payload.get("data", []) or []:
+        model_id = entry.get("id")
+        if not model_id:
+            continue
+        modalities = (entry.get("architecture") or {}).get("output_modalities") or []
+        if modalities and "text" not in modalities:
+            continue
+
+        pricing = entry.get("pricing") or {}
+        prompt_str = pricing.get("prompt")
+        completion_str = pricing.get("completion")
+        if prompt_str is None or completion_str is None:
+            continue
+        try:
+            prompt = float(prompt_str)
+            completion = float(completion_str)
+        except (TypeError, ValueError):
+            continue
+
+        # OpenRouter encodes "dynamic / unknown pricing" as -1 (used by their
+        # auto-router meta-models like openrouter/auto). Skip these — they
+        # aren't user-pickable models, just routing shortcuts.
+        if prompt < 0 or completion < 0:
+            continue
+
+        out.append(OpenRouterModel(
+            id=model_id,
+            prompt_per_million=prompt * 1_000_000,
+            completion_per_million=completion * 1_000_000,
+            context_length=int(entry.get("context_length") or 0),
+        ))
+
+    out.sort(key=lambda m: m.prompt_per_million + m.completion_per_million)
+    return out
+
+
 # ── Config builder ───────────────────────────────────────────────
 
 def build_config(
