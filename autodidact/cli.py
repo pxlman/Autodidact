@@ -22,8 +22,10 @@ from rich.console import Console
 from autodidact.agent import Agent, QueryResponse, SavingsReport
 from autodidact.hardware import detect_hardware, recommended_local_model
 from autodidact.setup_wizard import (
+    BedrockDiscoveryError,
     build_config,
     detect_ollama,
+    discover_bedrock_models,
     get_cloud_preset,
     get_ollama_install_command,
     install_ollama,
@@ -644,7 +646,12 @@ def _prompt_openai_compat_config(provider: str, preset: dict, slot: str) -> dict
 
 
 def _prompt_bedrock_config(preset: dict, slot: str) -> dict:
-    """Prompt for Bedrock: auth mode + region + model. No generic API key."""
+    """Prompt for Bedrock: auth mode + region + model. No generic API key.
+
+    The model list is *discovered* at this point by querying Bedrock with
+    the supplied region + auth. If discovery fails (no creds, no perms,
+    network), we fall back to a free-form prompt and surface the error.
+    """
     console.print("  Bedrock auth mode:")
     console.print("    1. IAM Role / default credential chain  (env vars, ~/.aws/credentials, SSO, IMDS)")
     console.print("    2. IAM User  (paste aws_access_key_id and aws_secret_access_key)")
@@ -672,7 +679,46 @@ def _prompt_bedrock_config(preset: dict, slot: str) -> dict:
     region = typer.prompt("  AWS region", default="us-west-2")
     bedrock_cfg["region"] = region
 
-    model = _prompt_model_name(preset, slot=slot)
+    # ── Live model discovery ─────────────────────────────────────
+    discovered: list[str] = []
+    discovery_error: Optional[BedrockDiscoveryError] = None
+    try:
+        discovered = discover_bedrock_models(
+            region=region,
+            auth_mode=auth_mode,
+            access_key_id=bedrock_cfg.get("access_key_id"),
+            secret_access_key=bedrock_cfg.get("secret_access_key"),
+            session_token=bedrock_cfg.get("session_token"),
+            api_key=bedrock_cfg.get("api_key"),
+        )
+    except BedrockDiscoveryError as e:
+        discovery_error = e
+
+    if discovered:
+        # Suggest a sensible default per slot if available.
+        prefer_cheap = ("haiku", "nova-micro", "nova-lite")
+        prefer_expensive = ("sonnet", "opus", "nova-pro", "nova-premier")
+        keywords = prefer_cheap if slot == "cheap" else prefer_expensive
+        default = next(
+            (m for kw in keywords for m in discovered if kw in m.lower()),
+            discovered[0],
+        )
+        choices = list(discovered) + [_OTHER_CHOICE]
+        chosen = _pick_from_list("Bedrock model", choices, default)
+        if chosen == _OTHER_CHOICE:
+            model = typer.prompt("  Model ID").strip()
+        else:
+            model = chosen
+    else:
+        if discovery_error is not None:
+            console.print(
+                f"  [yellow]Could not list Bedrock models:[/yellow] {discovery_error}",
+            )
+            console.print(
+                "  [dim]Falling back to manual entry. "
+                "Find IDs at https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html[/dim]",
+            )
+        model = typer.prompt("  Model ID").strip()
 
     return {
         "provider": "bedrock",
