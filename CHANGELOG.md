@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-05-13
+
+Polish, performance, and correctness on top of 1.0.0. No breaking changes.
+
+### Added
+
+- **Streaming chat** for both local and cloud paths — tokens render as they
+  arrive instead of waiting for the full response. Spinner disappears once
+  the first token lands. Anthropic extended-thinking content streams under
+  a `[THINKING]` header. (#18)
+- **`/learn <path>` chat slash command** — ingest documents from inside
+  a chat session without leaving the REPL. Bypasses LLM routing and calls
+  `DocumentStore.ingest()` directly. Supports `/learn .`, `/learn ~/x`, and
+  paths with whitespace. (#22)
+- **Live Bedrock model discovery** — `autodidact init` now queries
+  `list_foundation_models` + `list_inference_profiles` against the user's
+  region and presents only models they can actually invoke. Replaces the
+  static preset, which shipped invented IDs and IDs unavailable in some
+  regions. (#24)
+- **Live OpenRouter catalog browse** — picker gets a "Browse all OpenRouter
+  models" entry that hits `/v1/models`, sorts cheapest first, and shows
+  per-1M-token pricing alongside each ID. 364+ models available without
+  leaving the wizard. (#24)
+- **Wizard installs Ollama and starts the daemon when missing** —
+  `autodidact init` offers to run the official curl installer on macOS
+  and Linux, and to start the daemon if it is down. macOS Gatekeeper and
+  Login Items hint included on permission errors. (#16)
+- **Smaller default local models** — recommendations shifted down one tier
+  per hardware bucket. 32GB Apple Silicon now defaults to `qwen3:8b` instead
+  of `qwen3:14b`; the minimal tier stays at `qwen3:0.6b`. (#21)
+
+### Changed
+
+- **GSA forces `think=false`** to keep the YES/NO probe calibrated; reasoning
+  tokens were dragging probabilities toward the middle. The chat path keeps
+  thinking enabled by default. (#17)
+- **Default LLM client timeout** raised from 60s to 300s — large local
+  models can take longer than 60s on first-token cold-start. (#17)
+- **Retry policy split** by exception class — `ConnectionError` and
+  `ConnectTimeout` retry with exponential backoff; `ReadTimeout` fails
+  fast. Hung requests no longer multiply latency. (#17)
+- **Logprob requests dropped from the chat path** — adds ~150ms per Ollama
+  call and the post-local logprob gate is no longer used for routing. GSA
+  pre-gate plus the refusal detector cover the same need without the cost.
+  (#20)
+- **Bedrock model preset is now empty** — discovery is the source of truth.
+  Falls back to free-form input on any discovery failure. (#24)
+
+### Fixed
+
+- **GSA error message no longer hides Bedrock errors.** A wide `try/except`
+  in `Agent.query()` was wrapping both the GSA probe and the cloud
+  escalation. A `ValidationException` from Bedrock surfaced as
+  "GSA probe failed, skipping gate: ..." while local silently produced an
+  answer. The `try` is now scoped to the probe only; cloud errors
+  propagate. (#24)
+- **Logprob check no longer triggers false escalations on thinking
+  responses.** Thinking-token logprobs were averaged in with content,
+  dragging the local confidence below threshold. Routing now skips the
+  logprob signal when the response includes thinking tokens. (#19)
+- **Document chunks no longer overflow BGE-large's 512-token context.**
+  Default chunk size lowered to 384 tokens with a hard cap at 480. Live
+  `/learn .` no longer fails with "input length exceeds context length"
+  on code files. (#23)
+- **Ollama model verification rewritten to use `/api/show`.** Catches the
+  cloud-only manifest case — some Ollama tags pull a tiny manifest that
+  points at remote inference; the old `ollama list` parse couldn't tell
+  these apart from real local models. (#16)
+- **Wizard tests can no longer install Ollama on the host.** A conftest
+  fixture now blocks real installer invocation in tests, regression-guarding
+  an earlier accident. (#16)
+- **Embedding model namespace fix** — pulled the right tag for
+  `qllama/bge-large-en-v1.5`. (#7)
+
+
 ## [1.0.0] — 2026-05-09
 
 The first shippable release. A self-evolving AI agent with a local brain,
