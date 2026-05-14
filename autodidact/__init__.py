@@ -14,7 +14,7 @@ Quick start:
     print(response.answer)
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 from autodidact.agent import Agent, QueryResponse, SavingsReport
 
