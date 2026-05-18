@@ -1000,8 +1000,6 @@ class LLMClient:
         inference_config: dict[str, Any] = {}
         if "max_tokens" in opts:
             inference_config["maxTokens"] = int(opts["max_tokens"])
-        if "temperature" in opts:
-            inference_config["temperature"] = float(opts["temperature"])
         if "top_p" in opts:
             inference_config["topP"] = float(opts["top_p"])
 
@@ -1076,8 +1074,6 @@ class LLMClient:
         inference_config: dict[str, Any] = {}
         if "max_tokens" in opts:
             inference_config["maxTokens"] = int(opts["max_tokens"])
-        if "temperature" in opts:
-            inference_config["temperature"] = float(opts["temperature"])
         if "top_p" in opts:
             inference_config["topP"] = float(opts["top_p"])
 

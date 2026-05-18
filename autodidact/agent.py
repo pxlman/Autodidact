@@ -53,7 +53,7 @@ _DEFAULT_COST_RATES = {
 }
 
 # ── Similarity thresholds for memory retrieval tiers ───────────────
-MEMORY_DIRECT_THRESHOLD = 0.85   # return stored answer directly
+MEMORY_DIRECT_THRESHOLD = 0.80   # return stored answer directly
 MEMORY_CONTEXT_THRESHOLD = 0.60  # inject as reference context
 MEMORY_STALENESS_DAYS = 30        # re-verify entries older than this
 
@@ -70,8 +70,10 @@ class QueryResponse:
     cost_usd: float
     learned: bool  # True if a new KB entry was stored
     latency_ms: int
+    context_sources: list[str] = field(default_factory=list)  # what context was used: "memory", "docs:file.md"
     memory_source: Optional[str] = None  # the past question it recalled, if any
     memory_age_days: Optional[float] = None  # how old the memory entry is
+    memory_similarity: Optional[float] = None  # best memory hit score
     stale: bool = False  # True if memory answer is older than staleness threshold
     escalated_on_refusal: bool = False  # True if local refused and we forced cloud
     escalated_on_gsa: bool = False  # True if GSA pre-gate vetoed local
@@ -122,7 +124,7 @@ class Agent:
         confidence_threshold: float = 0.7,
         staleness_days: float = MEMORY_STALENESS_DAYS,
         gsa_enabled: bool = True,
-        gsa_threshold: float = 0.5,
+        gsa_threshold: float = 0.55,
     ) -> None:
         self.confidence_threshold = confidence_threshold
         self.staleness_days = staleness_days
@@ -251,7 +253,7 @@ class Agent:
                 on_progress(event)
 
         # ── Stage 1: Check memory ────────────────────────────────
-        memory_hits = self._check_memory(question)
+        memory_hits, q_emb = self._check_memory(question)
         best_hit = memory_hits[0] if memory_hits else None
 
         _emit({
@@ -281,9 +283,9 @@ class Agent:
 
                 if self._local_client is not None:
                     # Generate a full answer using memory as context.
-                    messages = self._build_messages(question, context, memory_hits)
+                    messages, ctx_sources = self._build_messages(question, context, memory_hits)
                     local_resp = self._local_client.chat(
-                        messages, max_tokens=1024, temperature=0.0,
+                        messages, max_tokens=4096, temperature=0.0,
                     )
                     answer = local_resp.content
 
@@ -297,41 +299,53 @@ class Agent:
                         cost_usd=0.0,
                         learned=False,
                         latency_ms=latency,
+                        context_sources=ctx_sources,
                         memory_source=entry.question,
                         memory_age_days=age_days,
                         stale=False,
                     )
 
         # ── Stage 1.5: GSA pre-gate ──────────────────────────────
-        # Ask the local model itself: "can you answer this?" before spending
-        # time generating a full response. If it self-reports NO with high
-        # probability, skip local and escalate directly. This catches the
-        # class of failures where the model would fabricate a plausible-
-        # sounding answer (high logprobs) to a question it has no real
-        # knowledge of — logprob-based confidence can't see the hallucination
-        # but a separate Y/N self-probe often can.
+        # Ask the local model "can you answer this?" before full generation.
+        # GSA sees both memory hits AND document hits so it knows what
+        # context the local model will have available.
         gsa_p_yes: Optional[float] = None
-        # Tolerate agents built via Agent.__new__ in older tests that don't
-        # set the GSA attrs. getattr defaults match __init__ defaults.
         gsa_enabled = getattr(self, "gsa_enabled", True)
-        gsa_threshold = getattr(self, "gsa_threshold", 0.5)
+        gsa_threshold = getattr(self, "gsa_threshold", 0.55)
+        best_similarity = best_hit.score if best_hit else 0.0
+        skip_gsa = best_similarity >= MEMORY_DIRECT_THRESHOLD
         if (
             gsa_enabled
+            and not skip_gsa
             and self._local_client is not None
             and self._cloud_client is not None
         ):
-            # The GSA probe is best-effort — a probe failure must not block
-            # the actual query. The try/except scope is deliberately narrow:
-            # ONLY the probe call. Escalation errors must propagate so the
-            # user sees the real problem instead of a misleading "GSA failed".
-            try:
-                if getattr(self, "_gsa", None) is None:
-                    self._gsa = SelfAssessment(self._local_client)
-                gsa_result = self._gsa.compute(question, retrieved_hits=memory_hits)
-                gsa_p_yes = gsa_result.p_yes
-            except Exception as e:
-                logger.warning("GSA probe failed, skipping gate: %s", e)
-                gsa_p_yes = None
+            # Check if documents have relevant context — if so, GSA should
+            # know about it (prevents false escalation on doc-answerable queries).
+            has_doc_context = False
+            store = getattr(self, "documents", None)
+            if store is not None:
+                try:
+                    doc_hits = store.search(question, limit=1, query_embedding=q_emb)
+                    has_doc_context = bool(doc_hits and doc_hits[0].score >= 0.75)
+                except Exception:
+                    pass
+
+            # Skip GSA if strong document context exists — the local model
+            # will have the information it needs to answer.
+            if has_doc_context:
+                skip_gsa = True
+
+            if not skip_gsa:
+                _emit({"type": "gsa_check"})
+                try:
+                    if getattr(self, "_gsa", None) is None:
+                        self._gsa = SelfAssessment(self._local_client)
+                    gsa_result = self._gsa.compute(question, retrieved_hits=memory_hits)
+                    gsa_p_yes = gsa_result.p_yes
+                except Exception as e:
+                    logger.warning("GSA probe failed, skipping gate: %s", e)
+                    gsa_p_yes = None
 
             if gsa_p_yes is not None and gsa_p_yes < gsa_threshold:
                 # Model self-reports it can't answer — skip local entirely.
@@ -356,23 +370,12 @@ class Agent:
                 )
             return self._escalate_to_cloud(question, context, memory_hits, started, _emit)
 
-        messages = self._build_messages(question, context, memory_hits)
+        messages, ctx_sources = self._build_messages(question, context, memory_hits)
         local_resp = self._call_local(messages, _emit)
 
-        # Refusal override: the local model can hedge or ask for clarification
-        # with highly confident tokens, which fools logprob-based routing.
-        # When the content looks like a voluntary surrender, escalate.
         refused = _looks_like_refusal(local_resp.content)
 
-        # Logprob-based confidence gating was removed (May 2026). Two reasons:
-        # 1. Thinking models (qwen3 etc.) have noisy avg_logprob over their
-        #    reasoning tokens, causing false escalations on perfect answers.
-        # 2. Requesting logprobs from Ollama added ~150ms per call (benchmarked).
-        # GSA gates pre-local; refusal detector gates post-local. Those are the
-        # two checkpoints the routing relies on now.
         if not refused:
-            # Local answered without refusing — return its answer.
-            # Confidence is reported as 1.0 since we no longer gate on logprobs.
             confidence = 1.0
             _emit({"type": "local_done", "confidence": confidence})
             latency = _elapsed_ms(started)
@@ -386,6 +389,8 @@ class Agent:
                 cost_usd=cost,
                 learned=False,
                 latency_ms=latency,
+                context_sources=ctx_sources,
+                memory_similarity=best_hit.score if best_hit else None,
                 gsa_p_yes=gsa_p_yes,
             )
 
@@ -531,13 +536,13 @@ class Agent:
             return self._local_client.chat_stream_ollama_no_logprobs(
                 messages,
                 on_token=_on_chunk,
-                max_tokens=1024,
+                max_tokens=4096,
                 temperature=0.0,
             )
 
         # Non-Ollama or test mock: no streaming, no logprobs.
         return self._local_client.chat(
-            messages, max_tokens=1024, temperature=0.0,
+            messages, max_tokens=4096, temperature=0.0,
         )
 
     def _call_cloud(
@@ -562,23 +567,26 @@ class Agent:
             return self._cloud_client.chat_stream(
                 messages,
                 on_token=_on_chunk,
-                max_tokens=1024,
-                temperature=0.0,
+                max_tokens=4096,
             )
 
         # Test fallback or unknown provider: no streaming.
-        return self._cloud_client.chat(messages, max_tokens=1024, temperature=0.0)
+        return self._cloud_client.chat(messages, max_tokens=4096)
 
-    def _check_memory(self, question: str) -> list[ScoredKnowledgeEntry]:
-        """Search the knowledge store for similar past Q&A."""
+    def _check_memory(self, question: str) -> tuple[list[ScoredKnowledgeEntry], Optional[np.ndarray]]:
+        """Search the knowledge store for similar past Q&A.
+
+        Returns (hits, query_embedding) so callers can reuse the embedding.
+        """
         if self._embed_client is None:
-            return []
+            return [], None
         try:
             q_emb = self._embed_client.embed(question)
-            return self.memory.search(q_emb, limit=5, min_similarity=0.0)
+            hits = self.memory.search(q_emb, limit=5, min_similarity=0.0)
+            return hits, q_emb
         except Exception as e:
             logger.warning("Memory search failed: %s", e)
-            return []
+            return [], None
 
     def _escalate_to_cloud(
         self,
@@ -595,7 +603,7 @@ class Agent:
 
         emit({"type": "cloud_call", "model": self._cloud_model_name or "unknown"})
 
-        messages = self._build_messages(question, context, memory_hits)
+        messages, _ = self._build_messages(question, context, memory_hits)
         cloud_resp = self._call_cloud(messages, emit)
         cost = self._estimate_cost(cloud_resp.input_tokens, cloud_resp.output_tokens)
 
@@ -607,24 +615,27 @@ class Agent:
         })
 
         # Learn from escalation in background — don't block the user.
-        import threading
-        t = threading.Thread(
-            target=self._learn,
-            args=(question, cloud_resp.content),
-            daemon=True,
-        )
-        t.start()
-        self._last_learn_thread = t
+        # Skip learning if cloud gave a non-answer.
+        will_learn = not _cloud_response_is_non_answer(cloud_resp.content)
+        if will_learn:
+            import threading
+            t = threading.Thread(
+                target=self._learn,
+                args=(question, cloud_resp.content),
+                daemon=True,
+            )
+            t.start()
+            self._last_learn_thread = t
 
         latency = _elapsed_ms(started)
-        self._record_query("cloud", cost, 0.0, latency, learned=True, question=question)
+        self._record_query("cloud", cost, 0.0, latency, learned=will_learn, question=question)
         self._append_history(question, cloud_resp.content)
         return QueryResponse(
             answer=cloud_resp.content,
             routed_to="cloud",
             confidence=0.0,
             cost_usd=cost,
-            learned=True,
+            learned=will_learn,
             latency_ms=latency,
             escalated_on_refusal=escalated_on_refusal,
         )
@@ -634,8 +645,12 @@ class Agent:
 
         Uses the LearningExtractor to extract structured knowledge entries
         from the cloud response. Falls back to storing the raw Q&A pair.
+        Skips learning if the cloud response is a non-answer (refusal/hedging).
         """
         if self._embed_client is None:
+            return False, 0
+        if _cloud_response_is_non_answer(answer):
+            logger.info("Cloud response is a non-answer; skipping learning.")
             return False, 0
         try:
             # Extract structured knowledge via local LLM (if available).
@@ -695,28 +710,43 @@ class Agent:
         question: str,
         context: Optional[str],
         memory_hits: list[ScoredKnowledgeEntry],
-    ) -> list[ChatMessage]:
-        """Build the prompt with all available context."""
+    ) -> tuple[list[ChatMessage], list[str]]:
+        """Build the prompt with all available context.
+
+        Returns (messages, context_sources) where context_sources lists
+        what was injected: "memory:N facts", "docs:filename.md", etc.
+        """
         parts: list[str] = []
+        sources: list[str] = []
 
         # System message.
-        parts.append("You are a helpful assistant. Answer the user's question accurately and concisely.")
+        parts.append(
+            "You are a helpful assistant. Answer the user's question accurately and concisely.\n"
+            "Use the context below and your training to answer confidently. "
+            "The user will lose trust if you fabricate facts or code — DO NOT make up "
+            "facts, code, or features that don't exist. Quote code exactly as shown. "
+            "Do NOT editorialize about what you can or cannot see in the context."
+        )
 
         # Memory context (from agent's learned knowledge).
         memory_context = self._format_memory_context(memory_hits)
         if memory_context:
             parts.append(f"\n{memory_context}")
+            relevant = [h for h in memory_hits if h.score >= MEMORY_CONTEXT_THRESHOLD]
+            sources.append(f"memory ({len(relevant[:3])} facts)")
 
         # Document context (from user's ingested source materials — R9 AC8).
-        # Framed distinctly from memory so the model knows "source material"
-        # vs "something you answered before".
-        document_context = self._format_document_context(question)
-        if document_context:
-            parts.append(f"\n{document_context}")
+        doc_sources = self._format_document_context_with_sources(question)
+        if doc_sources:
+            doc_context, doc_files = doc_sources
+            parts.append(f"\n{doc_context}")
+            for f in doc_files:
+                sources.append(f"docs:{f}")
 
         # External context (from user's RAG pipeline or caller-supplied).
         if context:
             parts.append(f"\nRelevant context:\n{context}")
+            sources.append("external")
 
         system = "\n".join(parts)
         messages = [ChatMessage(role="system", content=system)]
@@ -727,7 +757,7 @@ class Agent:
 
         # Current question.
         messages.append(ChatMessage(role="user", content=question))
-        return messages
+        return messages, sources
 
     def _format_memory_context(self, hits: list[ScoredKnowledgeEntry]) -> str:
         """Format memory hits into context for the prompt."""
@@ -741,31 +771,31 @@ class Agent:
             lines.append(f"{i}. (Previously asked: {q.strip()[:120]})\n   {a.strip()}")
         return "\n".join(lines)
 
-    def _format_document_context(self, question: str) -> str:
-        """Retrieve and format document chunks relevant to the question (R9 AC8).
+    def _format_document_context_with_sources(self, question: str) -> Optional[tuple[str, list[str]]]:
+        """Retrieve and format document chunks relevant to the question.
 
-        Returns empty string if no document store is attached, the store is
-        empty, or no chunk is above the relevance threshold.
+        Returns (context_string, [filenames]) or None if nothing found.
         """
         store = getattr(self, "documents", None)
         if store is None:
-            return ""
+            return None
         try:
-            hits = store.search_hybrid(question, limit=3)
+            hits = store.search_hybrid(question, limit=5)
         except Exception as e:
             logger.warning("Document retrieval failed: %s", e)
-            return ""
-        # Threshold is intentionally lower than memory's MEMORY_CONTEXT_THRESHOLD —
-        # docs are reference material, we inject them more liberally.
-        relevant = [h for h in hits if h.score >= 0.30]
+            return None
+        relevant = [h for h in hits if h.score >= 0.50]
         if not relevant:
-            return ""
+            return None
         lines = ["Here is relevant information from your documents:"]
+        files: list[str] = []
         for i, h in enumerate(relevant, 1):
-            content = (h.content or "")[:500].strip()
+            content = (h.content or "")[:1500].strip()
             source = Path(h.source_file).name if h.source_file else "document"
             lines.append(f"{i}. (from {source})\n   {content}")
-        return "\n".join(lines)
+            if source not in files:
+                files.append(source)
+        return "\n".join(lines), files
 
     def _compute_confidence(self, resp: ChatResponseWithLogprobs) -> float:
         """Compute logprob_uncertainty from a local model response.
@@ -862,15 +892,24 @@ class Agent:
 
 # ── Helpers ────────────────────────────────────────────────────────
 
+_OPENAI_COMPAT_PROVIDERS = frozenset({
+    "openai", "google", "openrouter", "deepseek", "mistral",
+    "groq", "together", "fireworks", "xai",
+})
+
+
 def _parse_model_string(model_str: str, default_provider: str = "ollama") -> tuple[str, str]:
     """Parse 'provider/model' into (provider, model). If no slash, use default_provider."""
     if "/" in model_str:
         parts = model_str.split("/", 1)
         provider = parts[0].lower()
         model = parts[1]
-        # Map common provider names.
-        if provider in ("ollama", "openai", "bedrock"):
-            return provider, model
+        if provider == "ollama":
+            return "ollama", model
+        if provider == "bedrock":
+            return "bedrock", model
+        if provider in _OPENAI_COMPAT_PROVIDERS:
+            return "openai", model
         # Treat unknown prefixes as part of the model name (e.g., "qllama/bge-large").
         return default_provider, model_str
     return default_provider, model_str
@@ -954,11 +993,43 @@ def _looks_like_refusal(text: str) -> bool:
     """Return True if the text reads like a voluntary surrender from the model.
 
     Catches hedges ('I don't have real-time data'), clarification requests
-    ('Did you mean X?'), and explicit I-don't-knows. Case-insensitive,
-    substring-based — deliberately simple; false positives are cheap (one
-    extra cloud call) but false negatives ship bad answers to users.
+    ('Did you mean X?'), and explicit I-don't-knows. Only checks the first
+    200 characters — real refusals happen upfront; mentions deeper in the
+    response are the model explaining/quoting, not refusing.
     """
     if not text:
         return False
-    lowered = text.lower()
+    lowered = text[:200].lower()
     return any(marker in lowered for marker in _REFUSAL_MARKERS)
+
+
+_NON_ANSWER_MARKERS = (
+    "i don't have reliable",
+    "i don't have specific",
+    "i don't have detailed",
+    "i don't have information",
+    "i do not have reliable",
+    "i do not have specific",
+    "i cannot provide accurate",
+    "i can't provide accurate",
+    "i'd recommend checking",
+    "i would recommend checking",
+    "rather than risk giving you inaccurate",
+    "i don't have up-to-date",
+    "i do not have up-to-date",
+    "my training data doesn't include",
+    "beyond my knowledge cutoff",
+    "i'm not able to confirm",
+)
+
+
+def _cloud_response_is_non_answer(text: str) -> bool:
+    """Return True if the cloud response is essentially 'I don't know, check elsewhere.'
+
+    These responses should NOT be stored as learned knowledge — they would
+    pollute memory with non-answers that get recalled on future similar queries.
+    """
+    if not text:
+        return True
+    lowered = text[:300].lower()
+    return any(marker in lowered for marker in _NON_ANSWER_MARKERS)

@@ -119,7 +119,7 @@ class TestRecommendedModel:
 
     def test_medium_tier(self):
         p = HardwareProfile(ram_gb=16, is_apple_silicon=False, has_nvidia=False, vram_gb=None, tier="medium")
-        assert recommended_local_model(p) == "qwen3:4b"
+        assert recommended_local_model(p) == "qwen3:8b"
 
     def test_low_tier(self):
         p = HardwareProfile(ram_gb=10, is_apple_silicon=False, has_nvidia=False, vram_gb=None, tier="low")
@@ -130,6 +130,6 @@ class TestRecommendedModel:
         assert recommended_local_model(p) == "qwen3:0.6b"
 
     def test_unknown_tier_falls_back_to_medium(self):
-        """When detection fails, pick the conservative mid-tier default (qwen3:4b)."""
+        """When detection fails, pick a safe default (qwen3:8b)."""
         p = HardwareProfile(ram_gb=0, is_apple_silicon=False, has_nvidia=False, vram_gb=None, tier="unknown")
-        assert recommended_local_model(p) == "qwen3:4b"
+        assert recommended_local_model(p) == "qwen3:8b"

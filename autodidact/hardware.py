@@ -134,10 +134,10 @@ def detect_hardware() -> HardwareProfile:
 # the bigger model are one pick away in the curated list (cli._LOCAL_MODEL_CHOICES).
 _TIER_MODELS = {
     "high":    "qwen3:8b",     # was qwen3:14b — 14b too slow on M-series
-    "medium":  "qwen3:4b",     # was qwen3:8b
-    "low":     "qwen3:1.7b",   # was qwen3:4b
-    "minimal": "qwen3:0.6b",   # unchanged
-    "unknown": "qwen3:4b",     # conservative mid-tier fallback (was qwen3:8b)
+    "medium":  "qwen3:8b",     # 16GB+ RAM handles 8b comfortably
+    "low":     "qwen3:1.7b",   # 8GB machines
+    "minimal": "qwen3:0.6b",   # <8GB
+    "unknown": "qwen3:8b",     # safe default — 8b runs on most modern machines
 }
 
 

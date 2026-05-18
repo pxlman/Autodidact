@@ -240,7 +240,7 @@ class TestGsaConfig:
     """Agent.__init__ exposes gsa_enabled and gsa_threshold knobs."""
 
     def test_defaults(self):
-        """Defaults: enabled, threshold 0.5."""
+        """Defaults: enabled, threshold 0.55."""
         # Use __new__ then __init__ would try to init DB — instead, test the attrs
         # after a fresh construction with a dummy path.
         import tempfile
@@ -250,7 +250,7 @@ class TestGsaConfig:
                 db_path=f"{td}/test.db",
             )
             assert agent.gsa_enabled is True
-            assert agent.gsa_threshold == 0.5
+            assert agent.gsa_threshold == 0.55
 
     def test_override(self):
         import tempfile

@@ -146,7 +146,7 @@ class TestOllamaAutoDetection:
     @patch("autodidact.cli.detect_ollama")
     @patch("autodidact.cli.verify_model_loadable", return_value=True)
     @patch("autodidact.cli.is_model_available", return_value=False)
-    @patch("autodidact.cli.pull_ollama_model", return_value=True)
+    @patch("autodidact.cli.pull_ollama_model", return_value=(True, ""))
     def test_missing_model_gets_pulled(
         self, mock_pull, mock_available, mock_verify, mock_detect, mock_smoke, tmp_path
     ):
@@ -170,7 +170,7 @@ class TestOllamaAutoDetection:
     @patch("autodidact.cli.detect_ollama")
     @patch("autodidact.cli.verify_model_loadable", return_value=False)
     @patch("autodidact.cli.is_model_available", return_value=False)
-    @patch("autodidact.cli.pull_ollama_model", return_value=True)
+    @patch("autodidact.cli.pull_ollama_model", return_value=(True, ""))
     def test_cloud_only_pull_fails_verification_and_exits(
         self, mock_pull, mock_available, mock_verify, mock_detect, mock_smoke, tmp_path
     ):

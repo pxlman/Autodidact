@@ -278,14 +278,21 @@ class TestPromptBedrockUsesDiscovery:
         from autodidact import cli
 
         prompts = iter([
-            "1",                    # auth mode 1 = default
             "us-west-2",            # region
         ])
         monkeypatch.setattr(cli.typer, "prompt", lambda *a, **k: next(prompts))
 
         captured: dict = {}
+        pick_calls = iter([
+            # First call: auth mode picker → pick default (IAM Role)
+            None,
+            # Second call: model picker → pick first discovered model
+            None,
+        ])
 
         def fake_pick(title, choices, default):
+            next(pick_calls)
+            captured["title"] = title
             captured["choices"] = choices
             captured["default"] = default
             return choices[0]
@@ -302,31 +309,27 @@ class TestPromptBedrockUsesDiscovery:
 
         result = cli._prompt_bedrock_config(preset={"models": [], "default_cheap": ""}, slot="cheap")
 
-        # The picker received discovered IDs, not the stale preset list.
+        # The model picker received discovered IDs.
         assert "anthropic.claude-3-5-haiku-20241022-v1:0" in captured["choices"]
         assert "us.anthropic.claude-sonnet-4-5-20250929-v1:0" in captured["choices"]
         assert result["model"] == "anthropic.claude-3-5-haiku-20241022-v1:0"
         assert result["bedrock"]["region"] == "us-west-2"
 
-    def test_falls_back_to_free_form_when_discovery_fails(self, monkeypatch):
+    def test_falls_back_to_fallback_list_when_discovery_fails(self, monkeypatch):
         from autodidact import cli
         from autodidact.setup_wizard import BedrockDiscoveryError
 
         prompts = iter([
-            "1",                                                  # auth mode 1 = default
             "us-west-2",                                          # region
-            "anthropic.claude-3-5-haiku-20241022-v1:0",           # free-form model
         ])
         monkeypatch.setattr(cli.typer, "prompt", lambda *a, **k: next(prompts))
 
-        # _pick_from_list must NOT be called in the failure path.
-        monkeypatch.setattr(
-            cli,
-            "_pick_from_list",
-            lambda *a, **k: pytest.fail(
-                "picker should not be invoked when discovery fails"
-            ),
-        )
+        # _pick_from_list returns the first auth choice then a fallback model.
+        picks = iter([
+            "IAM Role / default credential chain (env vars, ~/.aws/credentials, SSO, IMDS)",
+            "us.anthropic.claude-haiku-4-20250514-v1:0",
+        ])
+        monkeypatch.setattr(cli, "_pick_from_list", lambda *a, **k: next(picks))
 
         def boom(**kwargs):
             raise BedrockDiscoveryError("AccessDeniedException")
@@ -334,4 +337,4 @@ class TestPromptBedrockUsesDiscovery:
         monkeypatch.setattr(cli, "discover_bedrock_models", boom)
 
         result = cli._prompt_bedrock_config(preset={"models": [], "default_cheap": ""}, slot="cheap")
-        assert result["model"] == "anthropic.claude-3-5-haiku-20241022-v1:0"
+        assert result["model"] == "us.anthropic.claude-haiku-4-20250514-v1:0"

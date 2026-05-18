@@ -14,6 +14,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Callable, Optional
+import subprocess
+import time
 
 import typer
 import yaml
@@ -150,8 +152,8 @@ def _agent_from_config(config: dict) -> Agent:
 
     if cloud_model_name:
         cloud_model = f"{cloud_provider}/{cloud_model_name}"
-        cloud_base_url = cloud_cfg.get("base_url")
         preset = get_cloud_preset(cloud_provider)
+        cloud_base_url = cloud_cfg.get("base_url") or preset.get("base_url")
         cloud_api_key_env = preset.get("api_key_env") or "OPENAI_API_KEY"
         cloud_api_key = cloud_cfg.get("api_key")
         if cloud_api_key and cloud_api_key_env:
@@ -288,7 +290,11 @@ def _offer_to_install_ollama() -> bool:
         typer.prompt("Press Enter when Ollama is installed", default="", show_default=False)
         return detect_ollama().installed
 
-    cmd = get_ollama_install_command()
+    from autodidact.setup_wizard import _has_homebrew
+    if sys.platform == "darwin" and _has_homebrew():
+        cmd = "brew install ollama"
+    else:
+        cmd = get_ollama_install_command()
     console.print(f"  Install command: [cyan]{cmd}[/cyan]")
 
     if typer.confirm("Install Ollama automatically?", default=True):
@@ -320,6 +326,19 @@ def _offer_to_install_ollama() -> bool:
 
     console.print("Aborted. Re-run [cyan]autodidact init[/cyan] after installing Ollama.")
     return False
+
+
+def _restart_ollama() -> None:
+    """Kill and restart the Ollama daemon to pick up a new binary version."""
+    # Kill all ollama processes — old daemon from /Applications AND any serve processes.
+    # Use -9 to force-kill since the old daemon may resist SIGTERM.
+    for cmd in [["pkill", "-9", "-f", "Ollama"], ["pkill", "-9", "-f", "ollama serve"]]:
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    time.sleep(3)
+    start_ollama_daemon(wait_timeout_s=20.0)
 
 
 def _ensure_ollama_running() -> bool:
@@ -407,7 +426,8 @@ def _init_with_ollama(mode: str) -> dict:
     embedding_model = "qllama/bge-large-en-v1.5"
 
     # Auto-pull missing models, then verify.
-    if status.installed:
+    # Re-check status since Ollama may have been installed above.
+    if status.installed or is_ollama_running():
         _pull_and_verify(local_model, label="Chat model")
         _pull_and_verify(embedding_model, label="Embedding model")
 
@@ -457,24 +477,52 @@ def _pull_and_verify(model_name: str, *, label: str) -> None:
         return
 
     console.print(f"{label} [cyan]{model_name}[/cyan] not pulled yet. Downloading...", style="dim")
-    pull_ok = pull_ollama_model(model_name)
+    pull_ok, pull_error = pull_ollama_model(model_name)
+
+    if not pull_ok and ("newer version" in pull_error.lower() or "412" in pull_error):
+        # Step 1: Restart in case a newer binary is installed but old daemon is running.
+        console.print("  [dim]Ollama needs a newer version. Restarting daemon...[/dim]")
+        _restart_ollama()
+        pull_ok, pull_error = pull_ollama_model(model_name)
+
+    if not pull_ok and ("newer version" in pull_error.lower() or "412" in pull_error):
+        # Step 2: Homebrew may lag behind — try the official curl installer for the latest.
+        console.print("  [dim]Updating Ollama via official installer (this may take a minute)...[/dim]")
+        install_ollama_result = subprocess.run(
+            ["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
+            timeout=300,
+        )
+        if install_ollama_result.returncode == 0:
+            console.print("  [dim]Restarting Ollama...[/dim]")
+            _restart_ollama()
+            console.print(f"  [dim]Retrying pull of {model_name}...[/dim]")
+            pull_ok, pull_error = pull_ollama_model(model_name)
 
     if not pull_ok:
         console.print(
             f"\n[red]{label} [cyan]{model_name}[/cyan] download failed.[/red]"
         )
-        console.print(
-            "  Likely cause: network issue (TLS handshake failure, proxy, or firewall).\n"
-            "  Options:\n"
-            f"    1. [cyan]ollama pull {model_name}[/cyan] manually to see the full error\n"
-            "    2. Check your internet connection / VPN / proxy settings\n"
-            "    3. Try on a different network (e.g. personal hotspot)\n"
-            f"    4. Once pulled, re-run [cyan]autodidact init[/cyan]\n"
-            "\n"
-            "  [bold]On a corporate network?[/bold] Try [cyan]autodidact init[/cyan] and pick\n"
-            "  mode 2 (Cloud + Cloud) — no Ollama needed, just an API key.",
-            style="dim",
-        )
+        if "newer version" in pull_error.lower() or "412" in pull_error:
+            console.print(
+                "  [bold]Your Ollama version is outdated.[/bold]\n"
+                "  Update Ollama: [cyan]https://ollama.com/download[/cyan]\n"
+                f"  Then re-run [cyan]autodidact init[/cyan]",
+                style="dim",
+            )
+        else:
+            console.print(
+                "  Likely cause: network issue (TLS handshake failure, proxy, or firewall).\n"
+                "  Options:\n"
+                f"    1. [cyan]ollama pull {model_name}[/cyan] manually to see the full error\n"
+                "    2. Check your internet connection / VPN / proxy settings\n"
+                "    3. Try on a different network (e.g. personal hotspot)\n"
+                f"    4. Once pulled, re-run [cyan]autodidact init[/cyan]\n"
+                "\n"
+                "  [bold]On a corporate network?[/bold] Try disabling VPN and run\n"
+                "  [cyan]autodidact init[/cyan] again. Or choose mode 2 (Cloud + Cloud)\n"
+                "  — no Ollama needed, just an API key.",
+                style="dim",
+            )
         raise typer.Exit(1)
 
     if not verify_model_loadable(model_name):
@@ -675,13 +723,34 @@ def _pick_local_model(*, recommended: str) -> str:
     return chosen.split(" ", 1)[0].strip()
 
 
+_PROVIDER_LABELS: dict[str, str] = {
+    "google": "google (free tier available, no credit card needed)",
+    "openai": "openai (requires API key, not ChatGPT subscription)",
+    "anthropic": "anthropic (requires API key, not Claude subscription)",
+    "openrouter": "openrouter (pay-per-token, all models, from $0)",
+    "groq": "groq (free tier available, fast inference)",
+}
+
+
 def _pick_cloud_provider() -> str:
     """Show the cloud provider list with 'other' fallback."""
+    console.print(
+        "\n  [dim]Note: ChatGPT/Claude subscriptions do NOT include API access.[/dim]"
+        "\n  [dim]You need a separate API key — platform credits start at $5.[/dim]"
+        "\n  [dim]  Google:    https://aistudio.google.com/apikey (free)[/dim]"
+        "\n  [dim]  OpenAI:    https://platform.openai.com/api-keys[/dim]"
+        "\n  [dim]  Anthropic: https://console.anthropic.com/settings/keys[/dim]\n"
+    )
     providers = list_cloud_providers()
-    choices = list(providers) + [_OTHER_CHOICE]
-    chosen = _pick_from_list("Cloud provider", choices, "openai")
+    choices = [_PROVIDER_LABELS.get(p, p) for p in providers] + [_OTHER_CHOICE]
+    default_label = _PROVIDER_LABELS.get("bedrock", "bedrock")
+    chosen = _pick_from_list("Cloud provider", choices, default_label)
     if chosen == _OTHER_CHOICE:
         return typer.prompt("Provider name").strip().lower()
+    # Strip label decoration to get the raw provider key
+    for p in providers:
+        if chosen == _PROVIDER_LABELS.get(p, p):
+            return p
     return chosen
 
 
@@ -763,6 +832,8 @@ def _prompt_openai_compat_config(provider: str, preset: dict, slot: str) -> dict
     long and changes weekly; the curated preset can't keep up, and slug
     typos lose users at chat time.
     """
+    if provider == "google":
+        console.print("  [dim]Get a free key at: https://aistudio.google.com/apikey[/dim]")
     api_key = typer.prompt("  API key")
 
     if provider == "openrouter":
@@ -847,13 +918,18 @@ def _prompt_bedrock_config(preset: dict, slot: str) -> dict:
     the supplied region + auth. If discovery fails (no creds, no perms,
     network), we fall back to a free-form prompt and surface the error.
     """
-    console.print("  Bedrock auth mode:")
-    console.print("    1. IAM Role / default credential chain  (env vars, ~/.aws/credentials, SSO, IMDS)")
-    console.print("    2. IAM User  (paste aws_access_key_id and aws_secret_access_key)")
-    console.print("    3. Bedrock API key  (short-lived bearer token from AWS Console)")
-    mode_input = typer.prompt("  Mode", default="1").strip()
-    mode_map = {"1": "default", "2": "iam_user", "3": "api_key"}
-    auth_mode = mode_map.get(mode_input, "default")
+    auth_choices = [
+        "IAM Role / default credential chain (env vars, ~/.aws/credentials, SSO, IMDS)",
+        "IAM User (paste aws_access_key_id and aws_secret_access_key)",
+        "Bedrock API key (short-lived bearer token from AWS Console)",
+    ]
+    auth_chosen = _pick_from_list("Bedrock auth mode", auth_choices, auth_choices[0])
+    auth_mode_map = {
+        auth_choices[0]: "default",
+        auth_choices[1]: "iam_user",
+        auth_choices[2]: "api_key",
+    }
+    auth_mode = auth_mode_map.get(auth_chosen, "default")
 
     bedrock_cfg: dict = {"auth_mode": auth_mode}
 
@@ -909,11 +985,25 @@ def _prompt_bedrock_config(preset: dict, slot: str) -> dict:
             console.print(
                 f"  [yellow]Could not list Bedrock models:[/yellow] {discovery_error}",
             )
-            console.print(
-                "  [dim]Falling back to manual entry. "
-                "Find IDs at https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html[/dim]",
-            )
-        model = typer.prompt("  Model ID").strip()
+        # Offer common Bedrock models as defaults
+        fallback_models = [
+            "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+            "us.anthropic.claude-haiku-4-20250514-v1:0",
+            "us.anthropic.claude-opus-4-20250514-v1:0",
+            "us.amazon.nova-pro-v1:0",
+            "us.amazon.nova-lite-v1:0",
+        ]
+        keywords = ("haiku", "nova-lite") if slot == "cheap" else ("sonnet", "opus")
+        default = next(
+            (m for kw in keywords for m in fallback_models if kw in m),
+            fallback_models[0],
+        )
+        choices = fallback_models + [_OTHER_CHOICE]
+        chosen = _pick_from_list("Bedrock model", choices, default)
+        if chosen == _OTHER_CHOICE:
+            model = typer.prompt("  Model ID").strip()
+        else:
+            model = chosen
 
     return {
         "provider": "bedrock",
@@ -992,11 +1082,12 @@ def _render_smoke_test_error(exc: Exception, config: dict) -> None:
 @app.command()
 def chat(
     config_path: Optional[str] = typer.Option(None, "--config-path"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug info: memory similarity, GSA scores, routing signals"),
 ) -> None:
     """Interactive chat with visible thought process."""
     path = Path(config_path) if config_path else None
     agent = _get_agent(path)
-    renderer = ThoughtRenderer()
+    renderer = ThoughtRenderer(verbose=verbose)
 
     console.print("Autodidact chat — type 'quit' or 'exit' to stop.\n", style="bold")
 
@@ -1270,6 +1361,9 @@ def _run_with_spinner(call: Callable[[Callable[[dict], None]], QueryResponse]) -
                 else:
                     status.update("[dim]Checking memory...")
 
+            elif et == "gsa_check":
+                status.update("[dim]Confirming with local brain...")
+
             elif et == "memory_hit":
                 status.update("[dim]Recalling from memory...")
 
@@ -1282,7 +1376,13 @@ def _run_with_spinner(call: Callable[[Callable[[dict], None]], QueryResponse]) -
 
                 if phase == "thinking":
                     if state["phase"] != "thinking":
-                        status.update("[dim]Thinking...")
+                        if source == "local":
+                            status.update(
+                                "[dim]Local brain working...\n"
+                                "  If I fumble this one, type /cloud to ask my sensei"
+                            )
+                        else:
+                            status.update("[dim]Thinking...")
                         state["phase"] = "thinking"
                     state["thinking_buf"].append(text)
 
