@@ -60,6 +60,7 @@ def agent_with_db():
     agent._cloud_model_name = "openai/gpt-4o"
     agent._session_stats = SavingsReport()
     agent._history = []
+    agent.gsa_enabled = False
     return agent
 
 

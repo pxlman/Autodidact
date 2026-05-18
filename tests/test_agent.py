@@ -80,6 +80,7 @@ def agent_with_mocks(mock_local_client, mock_cloud_client):
     agent._session_stats = SavingsReport()
     agent._history = []
     agent.documents = None
+    agent.gsa_enabled = False
     return agent
 
 

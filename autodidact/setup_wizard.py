@@ -106,16 +106,20 @@ def verify_model_loadable(model_name: str) -> bool:
     return bool(fmt)
 
 
-def pull_ollama_model(model_name: str) -> bool:
-    """Pull a model via Ollama. Returns True on success."""
+def pull_ollama_model(model_name: str) -> tuple[bool, str]:
+    """Pull a model via Ollama. Returns (success, error_output)."""
     try:
         result = subprocess.run(
             ["ollama", "pull", model_name],
             timeout=600,  # 10 min timeout for large models
+            capture_output=True,
+            text=True,
         )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
+        if result.returncode == 0:
+            return True, ""
+        return False, result.stderr or result.stdout or ""
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        return False, str(e)
 
 
 # ── Platform-specific install commands ───────────────────────────
@@ -136,8 +140,20 @@ def get_ollama_install_command() -> str:
         return "Download from https://ollama.com/download/windows"
 
 
+def _has_homebrew() -> bool:
+    """Check if Homebrew is available."""
+    try:
+        result = subprocess.run(["brew", "--version"], capture_output=True, timeout=5)
+        return result.returncode == 0
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def install_ollama(retries: int = 2) -> bool:
     """Run the Ollama installer for the current platform.
+
+    On macOS, prefers Homebrew if available (works better on corporate
+    networks/VPNs). Falls back to the official curl installer.
 
     Retries on failure (transient 403s from Ollama's CDN are common).
     Returns True on success, False otherwise. Does NOT confirm with the user
@@ -148,6 +164,16 @@ def install_ollama(retries: int = 2) -> bool:
     if sys.platform not in ("darwin",) and not sys.platform.startswith("linux"):
         return False
 
+    # On macOS, try Homebrew first (better for corporate networks/VPNs).
+    if sys.platform == "darwin" and _has_homebrew():
+        try:
+            result = subprocess.run(["brew", "install", "ollama"], timeout=600)
+            if result.returncode == 0:
+                return True
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    # Fall back to the official curl installer.
     for attempt in range(retries):
         try:
             result = subprocess.run(
@@ -191,31 +217,32 @@ def wait_for_ollama_daemon(timeout_s: float = 30.0, poll_interval_s: float = 0.5
 def start_ollama_daemon(wait_timeout_s: float = 30.0) -> bool:
     """Best-effort start of the Ollama daemon.
 
-    macOS: opens the Ollama.app via `open -a Ollama` (the daemon ships as a
-    GUI app there). Linux: spawns `ollama serve` in the background.
+    macOS: tries `open -a Ollama` (GUI app from official installer), falls
+    back to `ollama serve` (Homebrew install). Linux: `ollama serve`.
 
     Returns True iff is_ollama_running becomes True within wait_timeout_s.
     """
     if sys.platform == "darwin":
-        cmd = ["open", "-a", "Ollama"]
+        cmds = [["open", "-a", "Ollama"], ["ollama", "serve"]]
     elif sys.platform.startswith("linux"):
-        cmd = ["ollama", "serve"]
+        cmds = [["ollama", "serve"]]
     else:
         return False
 
-    try:
-        # Detach so we don't keep the wizard waiting on the daemon process.
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except (OSError, FileNotFoundError):
-        return False
-
-    return wait_for_ollama_daemon(timeout_s=wait_timeout_s)
+    for cmd in cmds:
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            if wait_for_ollama_daemon(timeout_s=wait_timeout_s):
+                return True
+        except (OSError, FileNotFoundError):
+            continue
+    return False
 
 
 # ── Cloud provider presets ───────────────────────────────────────
@@ -252,6 +279,21 @@ _CLOUD_PRESETS: dict[str, dict] = {
         ],
         "default_cheap": "claude-haiku-4",
         "default_expensive": "claude-sonnet-4-5",
+        "embedding_model": None,
+    },
+    "google": {
+        # Google AI Studio — OpenAI-compatible endpoint. Free tier available
+        # (no credit card): 500 req/day for Flash, lower for Pro.
+        # Get a key at https://aistudio.google.com/apikey
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_key_env": "GOOGLE_API_KEY",
+        "models": [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash",
+        ],
+        "default_cheap": "gemini-2.5-flash",
+        "default_expensive": "gemini-2.5-pro",
         "embedding_model": None,
     },
     "openrouter": {

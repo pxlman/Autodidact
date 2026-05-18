@@ -24,6 +24,8 @@ autodidact learn <path>            # A brand-new agent has an empty brain. `auto
 autodidact chat                    # start talking to the agent
 ```
 
+> **Windows note:** If `autodidact` isn't found after install, use `python -m autodidact` instead (e.g. `python -m autodidact init`). This happens when Python's `Scripts/` folder isn't in your PATH.
+
 That's it. `autodidact init` walks you through five setup modes:
 
 1. **Local + Cloud** (default) — Ollama local model + cloud API for escalation. Best cost savings.
@@ -41,7 +43,7 @@ When you encounter a question, you go through this sequence:
 1. **Do I know the answer?** → Check your memory
 2. **Am I confident I can answer it?** → Self-assess
 3. **If yes** → Answer (free, fast)
-4. **If no** → Ask someone smarter (costs time, but you get the right answer)
+4. **If no** → Ask someone smarter (costs time and often money too, but you get the right answer)
 5. **Remember what you learned** → Store it
 6. **Next time, start from step 1** → You're smarter now
 
@@ -49,27 +51,7 @@ A new employee does this every day. The more tasks they do, the more knowledgeab
 
 **Autodidact makes AI work the same way.**
 
-### The visible thought process
-
-Every response shows the agent's reasoning, in real time:
-
-```
-You> What's our PTO policy?
-[THINKING] Checking memory... no relevant entries yet (0 hits)
-[CLOUD] Escalated — gpt-4o-mini took 1.2s
-[LEARNED] ✅ Stored: "Company PTO is 20 days per year, accrued monthly."
-  💰 $0.003 | Confidence: 0.34 → escalated | ✅ Learned
-
-You> How much vacation do I get?
-[THINKING] Checking memory... found 1 similar entry (similarity: 0.91)
-[MEMORY] Company PTO is 20 days per year, accrued monthly.
-  ↳ Recalled from: "What's our PTO policy?" (learned 0 days ago)
-  💰 $0.00 | Confidence: 0.91 | Route: memory
-```
-
-That's the "magic moment" - the user watching the agent answer from learned knowledge, for free, because it remembered a question it was asked moments ago.
-
-## Solving the cold start
+### Solving the cold start
 
 A brand-new agent has an empty brain. `autodidact learn` seeds it with existing knowledge:
 
@@ -79,20 +61,68 @@ autodidact learn ./README.md          # ingest a single file
 autodidact learn --stats              # show what's been ingested
 ```
 
-Supports `.md`, `.txt`, `.py`, `.ts`, `.yaml`, `.json`, `.csv`, `.html`, and 15+ other text formats. PDFs via `pip install "autodidact[pdf]"`. Chunks are stored separately from learned Q&A (one is reference material, the other is experience), but both get retrieved and injected into the prompt at query time.
+Supports `.md`, `.txt`, `.py`, `.ts`, `.js`, `.yaml`, `.json`, `.csv`, `.html`, and 15+ other text formats. Code files are split on function/class boundaries via tree-sitter (`pip install "autodidact[code]"`). PDFs via `pip install "autodidact[pdf]"`. Chunks are stored separately from learned Q&A (one is reference material, the other is experience), but both get retrieved and injected into the prompt at query time.
+
+### See it learn
+
+Feed it your docs:
+
+```bash
+$ autodidact learn ./engineering-docs/
+[1] deployment-guide.md → 8 chunks
+[2] architecture.md     → 15 chunks
+─── Ingestion Complete ───
+Files: 2 · Chunks: 23 · Synthesizing knowledge in background...
+```
+
+Ask something the docs alone can't fully answer:
+
+
+```bash
+you> How do I fix "connection refused" on staging?
+
+[CLOUD] Three common causes, ranked by frequency:
+  1. VPN dropped after sleep — `vpn connect staging`
+  2. Service crashed         — `kubectl get pods -n staging`
+  3. Stale DNS post-deploy   — `sudo dscacheutil -flushcache`
+
+↳ Source: deployment-guide.md
+💰 $0.012 | Route: cloud | ✅ Learned
+```
+
+The docs had the deployment steps, but the local model does not have the *troubleshooting wisdom* or not confident enough in in reasoning or judgemnt. Cloud provided it. The agent learned it.
+
+Next time:
+
+```bash
+you> Staging is down again, connection errors
+
+[LOCAL] This is almost always the VPN (it drops after sleep). Quick fix:
+  1. `vpn connect staging`
+  2. Still failing? `kubectl get pods -n staging` — service may have crashed
+  3. After a deploy, flush DNS: `sudo dscacheutil -flushcache`
+  ↳ Context: memory (2 facts)
+  💰 $0.00 | Route: local
+```
+
+Same knowledge. Zero cost. The answer is *better* than raw docs because it leads with the most likely cause (learned from the cloud's reasoning, not just document text).
+
+**That's the loop.** Every escalation makes the agent smarter. Every smart answer saves money. Over time, cloud calls approach zero.
+
 
 ## What's in v1.0.x
 
-- **Zero-friction setup wizard.** Auto-detects Ollama, pulls models, starts daemon, retries on failure. Presets for 10 cloud providers.
+- **Zero-friction setup wizard.** Auto-detects Ollama, pulls models, starts daemon, retries on failure. Installs via Homebrew (macOS) or official installer. Presets for 11 cloud providers including Google AI Studio (free tier, no credit card).
 - **Five setup modes.** Local+Cloud, Cloud+Cloud, Local+Local, Custom server, Local-only. Works everywhere — GPU, no GPU, corporate network, offline.
-- **Hybrid retrieval.** BM25 keyword search (FTS5) + vector similarity (FAISS), merged via Reciprocal Rank Fusion. Finds documents by exact terms AND meaning.
+- **AST-aware code chunking.** `autodidact learn` uses tree-sitter to split code on function/class boundaries (Python, JS, TS). Each chunk is a complete semantic unit with its class header preserved. Non-code files use overlap-based text splitting.
+- **Hybrid retrieval.** BM25 keyword search (FTS5) + vector similarity, merged via Reciprocal Rank Fusion. RRF orders results; cosine similarity scores them — so downstream thresholds remain meaningful.
 - **Document synthesis.** `autodidact learn` doesn't just index — it extracts key facts into memory (background, non-blocking). The agent answers from internalized knowledge, not raw chunks.
-- **Confidence-based routing.** GSA pre-screen + logprob uncertainty + refusal detection. Escalates when uncertain, stays local when confident.
-- **Learning from escalations.** Structured knowledge extraction from cloud responses (background, non-blocking). Deduplication on insert.
+- **Confidence-based routing.** GSA pre-screen + logprob uncertainty + refusal detection. Escalates when uncertain, stays local when confident. Non-answer detection prevents learning from "I don't know" cloud responses.
+- **Learning from escalations.** Structured knowledge extraction from cloud responses (background, non-blocking). Deduplication on insert. Memory recall at 0.80+ similarity serves learned answers directly.
 - **Visible learning UX.** `[THINKING]`, `[MEMORY]`, `[LOCAL]`, `[CLOUD]`, `[LEARNED]` tags show what the agent is doing and why.
 - **Cost tracking.** `autodidact savings` reports cumulative cost avoided vs an all-cloud baseline.
 - **Local-first.** All state in one portable SQLite file (`~/.autodidact/memory.db`). Works offline after setup.
-- **Multi-provider.** Ollama, any OpenAI-compatible server (llama.cpp, LM Studio, vLLM), AWS Bedrock. 10 cloud provider presets.
+- **Multi-provider.** Ollama, any OpenAI-compatible server (llama.cpp, LM Studio, vLLM), AWS Bedrock, Google AI Studio, OpenRouter, and 8 more. 11 cloud provider presets.
 
 ## Commands
 
@@ -115,7 +145,7 @@ autodidact memory search    Search what the agent has learned
 - No MCP server (v2.0)
 - No OpenAI-compatible proxy mode (v1.5 — `autodidact serve`)
 
-All of these are designed and planned. See [`docs/DESIGN-V2.md`](docs/DESIGN-V2.md) for architecture.
+All of these are designed and planned.
 
 ## What we **have** verified empirically:
 
@@ -124,27 +154,26 @@ All of these are designed and planned. See [`docs/DESIGN-V2.md`](docs/DESIGN-V2.
 - Naive multi-signal fusion hurts - the best single signal beats the mean of all 6 signals.
 - Signal quality correlates with RLHF calibration training across model families (Qwen > Llama).
 
-Full write-up: [`paper/blog-post.md`](paper/blog-post.md). Research findings have their own home at [zero-shot-llm-confidence](https://github.com/paulnnguyen/zero-shot-llm-confidence).
+Full write-up: [`paper`](https://arxiv.org/html/2605.02241v1). Research findings have their own home at [zero-shot-llm-confidence](https://github.com/BuffaloTechRider/zero-shot-llm-confidence-estimation).
 
 ## Roadmap
 
 | Version | What | Status |
 |---------|------|--------|
-| v1.0.3  | Hybrid retrieval, document synthesis, 5 setup modes | **Current** |
+| v1.0.4  | AST-aware chunking, Google AI Studio provider, memory transfer, non-answer filtering | **Current** |
 | v1.5    | Topic pages, USearch, parallel retrieval, `autodidact serve` proxy | In progress |
 | v2.0    | Tool execution, skill learning, tiered routing, reranking, curator | Designed |
 | v3.0    | Agent network — agents teaching each other | Planned |
-
-See [`docs/DESIGN-V2.md`](docs/DESIGN-V2.md) for the full architecture.
 
 ## Tech stack
 
 - **Python 3.10+**
 - **SQLite** (WAL mode) - all state in one portable file
 - **FAISS** - vector retrieval
+- **tree-sitter** - AST-aware code chunking (optional, for `.py`, `.js`, `.ts`)
 - **Pydantic v2** - validation
 - **Typer + Rich** - CLI
-- **Ollama / OpenAI-compatible / AWS Bedrock** - LLM backends
+- **Ollama / OpenAI-compatible / AWS Bedrock / Google AI Studio** - LLM backends
 
 ## Contributing
 

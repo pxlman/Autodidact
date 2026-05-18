@@ -156,7 +156,264 @@ def _count_bge_tokens(text: str) -> Optional[int]:
     return len(tok.encode(text).ids)
 
 
-# ── Chunking ─────────────────────────────────────────────────────
+# ── AST-aware chunking (tree-sitter) ─────────────────────────────
+
+# Language extensions → tree-sitter grammar loader. Loaded lazily.
+_TS_LANGUAGE_MAP: dict[str, str] = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+}
+
+# Node types that represent top-level semantic units per language.
+_TS_CHUNK_NODE_TYPES: dict[str, set[str]] = {
+    "python": {"function_definition", "class_definition", "decorated_definition"},
+    "javascript": {"function_declaration", "class_declaration", "export_statement",
+                   "lexical_declaration", "expression_statement"},
+    "typescript": {"function_declaration", "class_declaration", "export_statement",
+                   "lexical_declaration", "interface_declaration", "type_alias_declaration"},
+    "tsx": {"function_declaration", "class_declaration", "export_statement",
+            "lexical_declaration", "interface_declaration", "type_alias_declaration"},
+}
+
+
+def _get_ts_parser(lang: str):
+    """Return a tree-sitter Parser for the given language, or None."""
+    try:
+        import tree_sitter as ts
+        if lang == "python":
+            import tree_sitter_python as tsl
+        elif lang == "javascript":
+            import tree_sitter_javascript as tsl
+        elif lang in ("typescript", "tsx"):
+            import tree_sitter_typescript as tsl_mod
+            tsl = tsl_mod
+        else:
+            return None
+        if lang == "tsx":
+            language = ts.Language(tsl.language_tsx())
+        elif lang == "typescript":
+            language = ts.Language(tsl.language_typescript())
+        else:
+            language = ts.Language(tsl.language())
+        return ts.Parser(language)
+    except (ImportError, Exception) as e:
+        logger.debug("tree-sitter unavailable for %s: %s", lang, e)
+        return None
+
+
+def chunk_code_ast(
+    text: str,
+    ext: str,
+    *,
+    max_chunk_tokens: int = _SAFE_CHUNK_TOKEN_CAP,
+) -> Optional[list[str]]:
+    """Split code into semantic chunks using tree-sitter AST.
+
+    Returns a list of chunks where each chunk is a complete top-level
+    definition (function, class, etc.). Adjacent small nodes (imports,
+    assignments, comments) are grouped together up to max_chunk_tokens.
+
+    Returns None if tree-sitter is unavailable or the extension is unsupported,
+    signaling the caller to fall back to chunk_text().
+    """
+    lang = _TS_LANGUAGE_MAP.get(ext)
+    if lang is None:
+        return None
+    parser = _get_ts_parser(lang)
+    if parser is None:
+        return None
+
+    text_bytes = text.encode("utf-8")
+    tree = parser.parse(text_bytes)
+    root = tree.root_node
+    chunk_types = _TS_CHUNK_NODE_TYPES.get(lang, set())
+
+    def _node_text(node) -> str:
+        return text_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+    # Extract top-level nodes as text segments.
+    segments: list[str] = []
+    for child in root.children:
+        segment = _node_text(child).strip()
+        if segment:
+            segments.append(segment)
+
+    if not segments:
+        return None
+
+    # Group segments: large definitions (functions/classes) become their own
+    # chunk. Small segments (imports, assignments) are grouped together.
+    chunks: list[str] = []
+    buffer: list[str] = []
+    buffer_tokens = 0
+    char_per_tok = _FALLBACK_CHARS_PER_TOKEN  # code is denser than prose
+
+    for child in root.children:
+        segment = _node_text(child).strip()
+        if not segment:
+            continue
+        seg_tokens = len(segment) // char_per_tok
+
+        is_definition = child.type in chunk_types
+
+        if is_definition and seg_tokens > max_chunk_tokens // 3:
+            # Flush buffer first
+            if buffer:
+                chunks.append("\n".join(buffer))
+                buffer = []
+                buffer_tokens = 0
+            # Large definition gets its own chunk (may need sub-splitting)
+            if seg_tokens <= max_chunk_tokens:
+                chunks.append(segment)
+            else:
+                # Split large class into its methods
+                sub_chunks = _split_large_node(text_bytes, child, chunk_types, max_chunk_tokens, char_per_tok)
+                chunks.extend(sub_chunks)
+        else:
+            # Small node — accumulate in buffer
+            if buffer_tokens + seg_tokens > max_chunk_tokens and buffer:
+                chunks.append("\n".join(buffer))
+                buffer = []
+                buffer_tokens = 0
+            buffer.append(segment)
+            buffer_tokens += seg_tokens
+
+    if buffer:
+        chunks.append("\n".join(buffer))
+
+    if not chunks:
+        return None
+    # Sub-split any oversized chunks, preserving the function/class signature
+    # as a header on each piece so the model keeps enclosing context.
+    cap_chars = int(max_chunk_tokens * _FALLBACK_CHARS_PER_TOKEN)
+    final: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= cap_chars:
+            final.append(chunk)
+        else:
+            final.extend(_subsplit_with_header(chunk, cap_chars))
+    # Final pass: enforce the hard token cap with the real tokenizer.
+    return _enforce_cap(final, int(_SAFE_CHUNK_TOKEN_CAP * _FALLBACK_CHARS_PER_TOKEN))
+
+
+def _subsplit_with_header(chunk: str, cap_chars: int) -> list[str]:
+    """Split an oversized AST chunk, keeping its signature as header context.
+
+    Extracts a header containing the class and/or def signature lines,
+    then prepends it to each sub-chunk so the model knows the context.
+    """
+    lines = chunk.split("\n")
+    # Collect header: all class/def signature lines (handles "class X:\n    def foo(...):")
+    header_lines: list[str] = []
+    found_def = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("def ") or stripped.startswith("async def "):
+            header_lines.append(line)
+            found_def = True
+            # Include continuation lines of multi-line signature (until `:`)
+            if stripped.endswith(":"):
+                break
+            continue
+        if stripped.startswith("class "):
+            header_lines.append(line)
+            continue
+        if found_def:
+            # Inside multi-line def signature — keep going until `)`/`:`
+            header_lines.append(line)
+            if "):" in stripped or stripped.endswith(":"):
+                break
+            continue
+        if not header_lines or (header_lines and not found_def):
+            # Before finding def/class or between class and def
+            if stripped.startswith("@") or stripped.startswith("class "):
+                header_lines.append(line)
+            elif header_lines and not stripped:
+                continue
+            elif len(header_lines) < 5:
+                continue
+            else:
+                break
+    header = "\n".join(header_lines) if header_lines else lines[0] if lines else ""
+    # Reserve room for the header that gets prepended to sub-chunks 1+.
+    header_token_budget = int(len(header) / _FALLBACK_CHARS_PER_TOKEN) + 10
+    target = _SAFE_CHUNK_TOKEN_CAP - header_token_budget
+    sub_chunks = chunk_text(chunk, chunk_size=max(200, target), overlap=0)
+    if not sub_chunks:
+        return [chunk[:cap_chars]]
+    result: list[str] = []
+    for i, sc in enumerate(sub_chunks):
+        if i == 0:
+            result.append(sc)
+        else:
+            result.append(header + "\n" + sc)
+    return result
+
+
+def _split_large_node(
+    text_bytes: bytes, node, chunk_types: set[str], max_tokens: int, char_per_tok: int
+) -> list[str]:
+    """Split a large node (e.g. a big class) into method-level chunks.
+
+    Each method becomes its own chunk, prefixed with the class signature line
+    so the model knows the enclosing context.
+    """
+    def _nb(n) -> str:
+        return text_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
+
+    # For Python classes: body is in a "block" child node.
+    # For JS/TS: body is in "class_body" or "statement_block".
+    block = None
+    for child in node.children:
+        if child.type in ("block", "class_body", "statement_block"):
+            block = child
+            break
+
+    if block is None:
+        return [_nb(node).strip()]
+
+    # Header = class signature (everything from node start to block start).
+    header = text_bytes[node.start_byte:block.start_byte].decode("utf-8", errors="replace").strip()
+
+    # Split block children into method-level segments.
+    method_types = chunk_types | {"function_definition", "decorated_definition"}
+    chunks: list[str] = []
+    buffer: list[str] = []
+    buffer_tokens = len(header) // char_per_tok
+
+    for child in block.children:
+        segment = _nb(child).strip()
+        if not segment:
+            continue
+        seg_tokens = len(segment) // char_per_tok
+
+        is_method = child.type in method_types
+
+        if is_method and seg_tokens > max_tokens // 4:
+            # Flush buffer, then emit this method as its own chunk
+            if buffer:
+                chunks.append(header + "\n    " + "\n    ".join(buffer))
+                buffer = []
+                buffer_tokens = len(header) // char_per_tok
+            chunks.append(header + "\n    " + segment)
+        else:
+            if buffer_tokens + seg_tokens > max_tokens and buffer:
+                chunks.append(header + "\n    " + "\n    ".join(buffer))
+                buffer = []
+                buffer_tokens = len(header) // char_per_tok
+            buffer.append(segment)
+            buffer_tokens += seg_tokens
+
+    if buffer:
+        chunks.append(header + "\n    " + "\n    ".join(buffer))
+
+    return chunks if chunks else [_nb(node).strip()]
+
+
+# ── Text chunking (fallback for non-code files) ──────────────────
 
 def chunk_text(
     text: str,
@@ -432,7 +689,11 @@ class DocumentStore:
                 files_skipped += 1
                 continue
 
-            chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
+            # Prefer AST-aware chunking for code files; fall back to text splitter.
+            ext = file_path.suffix.lower()
+            chunks = chunk_code_ast(text, ext)
+            if chunks is None:
+                chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
             if not chunks:
                 files_skipped += 1
                 continue
@@ -481,20 +742,24 @@ class DocumentStore:
             files_skipped=files_skipped,
         )
 
-    def search(self, query: str, *, limit: int = 5) -> list[ScoredChunk]:
+    def search(self, query: str, *, limit: int = 5, query_embedding: Optional[np.ndarray] = None) -> list[ScoredChunk]:
         """Search for chunks semantically similar to `query`.
 
         Returns up to `limit` results sorted by descending similarity.
-        Empty store returns an empty list.
+        Empty store returns an empty list. Pass `query_embedding` to skip
+        the embedding call (reuse from a prior embed).
         """
         if self.count() == 0:
             return []
 
-        try:
-            query_emb = np.asarray(self._embed_client.embed(query), dtype=np.float32)
-        except Exception as e:
-            logger.warning("Document search failed to embed query: %s", e)
-            return []
+        if query_embedding is not None:
+            query_emb = np.asarray(query_embedding, dtype=np.float32)
+        else:
+            try:
+                query_emb = np.asarray(self._embed_client.embed(query), dtype=np.float32)
+            except Exception as e:
+                logger.warning("Document search failed to embed query: %s", e)
+                return []
 
         # Pull all chunks (small v1.0 scope — brute-force scan). FAISS index
         # is a v1.1 optimization once KB is large enough to warrant it.
@@ -546,11 +811,13 @@ class DocumentStore:
         return scored
 
     def search_hybrid(self, query: str, *, limit: int = 5) -> list[ScoredChunk]:
-        """Hybrid BM25 + vector search merged via Reciprocal Rank Fusion.
+        """Hybrid BM25 + vector search with RRF ordering and cosine scoring.
 
-        Runs both retrieval methods, combines results using RRF (k=60),
-        and returns the top `limit` results by fused score. Documents found
-        by both methods are ranked higher than those found by only one.
+        Uses Reciprocal Rank Fusion (k=60) to ORDER results — chunks found
+        by both methods rank higher. The returned SCORE is the vector cosine
+        similarity (0-1 absolute relevance), so downstream thresholds like
+        0.75 and 0.30 remain meaningful. BM25-only hits get a small penalty
+        since we have no cosine score for them.
         """
         vector_results = self.search(query, limit=limit * 3)
         bm25_results = self.search_bm25(query, limit=limit * 3)
@@ -563,11 +830,15 @@ class DocumentStore:
             return bm25_results[:limit]
 
         RRF_K = 60
+
         vector_ranks: dict[str, int] = {
             r.chunk.id: rank for rank, r in enumerate(vector_results)
         }
         bm25_ranks: dict[str, int] = {
             r.chunk.id: rank for rank, r in enumerate(bm25_results)
+        }
+        vector_scores: dict[str, float] = {
+            r.chunk.id: r.score for r in vector_results
         }
 
         all_ids = set(vector_ranks.keys()) | set(bm25_ranks.keys())
@@ -577,15 +848,22 @@ class DocumentStore:
         for r in bm25_results:
             chunk_map[r.chunk.id] = r.chunk
 
-        fused: list[ScoredChunk] = []
+        # RRF for ordering
+        rrf_ordered: list[tuple[str, float]] = []
         for chunk_id in all_ids:
             v_rank = vector_ranks.get(chunk_id, len(vector_results) + 1)
             b_rank = bm25_ranks.get(chunk_id, len(bm25_results) + 1)
             rrf_score = 1.0 / (RRF_K + v_rank) + 1.0 / (RRF_K + b_rank)
-            fused.append(ScoredChunk(chunk=chunk_map[chunk_id], score=rrf_score))
+            rrf_ordered.append((chunk_id, rrf_score))
+        rrf_ordered.sort(key=lambda x: x[1], reverse=True)
 
-        fused.sort(key=lambda s: s.score, reverse=True)
-        return fused[:limit]
+        # Score = cosine similarity from vector search (BM25-only hits get 0.0)
+        fused: list[ScoredChunk] = []
+        for chunk_id, _ in rrf_ordered[:limit]:
+            score = vector_scores.get(chunk_id, 0.0)
+            fused.append(ScoredChunk(chunk=chunk_map[chunk_id], score=score))
+
+        return fused
 
     def count(self) -> int:
         """Total number of chunks in the store."""

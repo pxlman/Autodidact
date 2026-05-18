@@ -119,11 +119,11 @@ class TestIsModelAvailable:
 class TestPullVerification:
     """The two-step pull-then-verify flow."""
 
-    @patch("autodidact.setup_wizard.pull_ollama_model", return_value=True)
+    @patch("autodidact.setup_wizard.pull_ollama_model", return_value=(True, ""))
     @patch("autodidact.setup_wizard.verify_model_loadable", return_value=False)
     def test_pull_that_does_not_make_model_loadable_is_detected(self, _verify, _pull):
         """Direct test of the guard: after a 'successful' pull, verify fails
         for a cloud-only manifest."""
         from autodidact.setup_wizard import pull_ollama_model, verify_model_loadable
-        assert pull_ollama_model("qwen3-coder:480b-cloud") is True
+        assert pull_ollama_model("qwen3-coder:480b-cloud") == (True, "")
         assert verify_model_loadable("qwen3-coder:480b-cloud") is False

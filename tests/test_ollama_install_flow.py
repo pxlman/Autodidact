@@ -92,9 +92,10 @@ class TestInstallCommand:
 class TestInstallOllama:
     """Runs the install command. Returns True on a successful subprocess run."""
 
+    @patch("autodidact.setup_wizard._has_homebrew", return_value=False)
     @patch("autodidact.setup_wizard.subprocess.run")
     @patch("autodidact.setup_wizard.sys")
-    def test_macos_install_success(self, mock_sys, mock_run):
+    def test_macos_install_success(self, mock_sys, mock_run, _mock_brew):
         mock_sys.platform = "darwin"
         mock_run.return_value = MagicMock(returncode=0)
         assert install_ollama() is True
