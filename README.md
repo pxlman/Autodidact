@@ -9,6 +9,8 @@ https://github.com/user-attachments/assets/fe196a13-4046-4be2-82db-74445109cbca
 * **67%** of repetitive codebase/doc queries successfully intercepted by local memory or rag.
 * **~70% cost saved** over just 30 standard development queries.
 
+<img width="1200" height="720" alt="autodidact-session-summary" src="https://github.com/user-attachments/assets/d05642ec-70e8-4eb9-aeb8-fa6f1972f52c" />
+
 ## Four-command quickstart
 
 ```bash
@@ -171,7 +173,7 @@ Full write-up: [`paper`](https://arxiv.org/html/2605.02241v1). Research findings
 
 | Version | What | Status |
 |---------|------|--------|
-| v1.0.6  | AST-aware chunking, Google AI Studio provider, memory transfer, non-answer filtering | **Current** |
+| v1.0.7  | AST-aware chunking, Google AI Studio provider, memory transfer, non-answer filtering | **Current** |
 | v1.5    | Query rewriting, markdown-aware chunking, parent-child retrieval, contextual chunking, topic pages, `autodidact serve` proxy | Planned |
 | v2.0    | Agentic retrieval (readFile), tool execution, skill learning, tiered routing, reranking, MCP server | Designed |
 | v3.0    | Agent network — agents teaching each other | Planned |
