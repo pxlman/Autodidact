@@ -678,7 +678,6 @@ class DocumentStore:
                 try:
                     import pymupdf
                     doc = pymupdf.open(file_path)
-                    text = ""
                     text = "\n".join([page.get_text() for page in doc])
                     return text
                 except ImportError:
